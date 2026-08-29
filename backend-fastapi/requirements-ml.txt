@@ -1,0 +1,13 @@
+# Heavy ML inference dependencies for the real grading pipeline (§9 of
+# implementation_plan.md). Install these only when ready to run real
+# OpenCV preprocessing + MobileNetV3/YOLOv8n inference.
+#
+# grading/pipeline.py lazily imports everything below and gracefully falls
+# back to a deterministic stub grading result (with a logged TODO) when these
+# are not installed, so the base service (requirements.txt) stays fast to
+# install and fully bootable/testable without this file.
+opencv-python>=4.11
+torch>=2.6
+torchvision>=0.21
+ultralytics>=8.3
+numpy>=2.2

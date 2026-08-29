@@ -1,0 +1,63 @@
+name: Test Backend
+
+on:
+  push:
+    paths:
+      - "backend-django/**"
+      - "backend-fastapi/**"
+  pull_request:
+    paths:
+      - "backend-django/**"
+      - "backend-fastapi/**"
+
+jobs:
+  test-django:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:17-3.5
+        env:
+          POSTGRES_DB: msme_marketplace_test
+          POSTGRES_USER: msme_dev
+          POSTGRES_PASSWORD: devpassword
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://msme_dev:devpassword@localhost:5432/msme_marketplace_test
+      DJANGO_SECRET_KEY: ci-test-secret
+      DJANGO_DEBUG: "True"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: backend-django
+        run: pip install -r requirements.txt
+      - name: Run migrations
+        working-directory: backend-django
+        run: python manage.py migrate
+      - name: Run tests
+        working-directory: backend-django
+        run: python manage.py test
+
+  test-fastapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: backend-fastapi
+        run: |
+          pip install -r requirements.txt
+          pip install pytest httpx
+      - name: Run tests
+        working-directory: backend-fastapi
+        run: pytest

@@ -1,0 +1,2 @@
+# Dev/test-only dependencies. Not required to run the service.
+pytest>=8.0

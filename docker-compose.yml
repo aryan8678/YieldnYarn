@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    container_name: msme-postgres
+    environment:
+      POSTGRES_DB: msme_marketplace
+      POSTGRES_USER: msme_dev
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-devpassword}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U msme_dev -d msme_marketplace"]
+      interval: 10s
+      retries: 5
+
+  media:
+    image: busybox
+    volumes:
+      - media_storage:/media
+    command: "true"
+
+volumes:
+  pgdata:
+  media_storage:

@@ -1,0 +1,42 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.sqlite3
+staticfiles/
+media/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+web-app/.env*.local
+next-env.d.ts
+
+# --- Env files ---
+.env
+.env.local
+
+# --- Android / Gradle ---
+seller-app/.gradle/
+seller-app/build/
+seller-app/app/build/
+seller-app/local.properties
+*.iml
+.idea/
+
+# --- ML ---
+ml-training/**/*.pt
+ml-training/**/*.pth
+ml-training/**/checkpoints/
+ml-training/**/runs/
+
+# --- OS / Editor ---
+.DS_Store
+*.log
+.vscode/
+
+# --- Docker ---
+pgdata/
