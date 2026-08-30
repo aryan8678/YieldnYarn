@@ -37,6 +37,7 @@ ml-training/**/runs/
 .DS_Store
 *.log
 .vscode/
+**/CLAUDE.md
 
 # --- Docker ---
 pgdata/

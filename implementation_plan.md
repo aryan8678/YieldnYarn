@@ -11,6 +11,7 @@ This is a **single-phase, in-depth implementation plan** covering the entire pro
 
 ## Table of Contents
 
+0. [Current Implementation Status](#0-current-implementation-status)
 1. [System Dependencies & Environment Setup](#1-system-dependencies--environment-setup)
 2. [Monorepo Scaffold & DevOps Foundation](#2-monorepo-scaffold--devops-foundation)
 3. [Database Design & Docker Compose](#3-database-design--docker-compose)
@@ -22,10 +23,36 @@ This is a **single-phase, in-depth implementation plan** covering the entire pro
 9. [ML Grading Pipeline](#9-ml-grading-pipeline)
 10. [Integration, Testing & Polish](#10-integration-testing--polish)
 11. [Azure Production Migration (Phase 7)](#11-azure-production-migration-phase-7)
+12. [Pending Work — Prioritized](#12-pending-work--prioritized)
+
+---
+
+## 0. Current Implementation Status
+
+> [!NOTE]
+> **Last audited: 2026-08-30.** This section is a snapshot, not a living dashboard — re-verify against the codebase before trusting it if much time has passed.
+
+The general shape of where the project stands: **both backends are further along than the frontend-to-backend wiring**, the **frontend UI is complete for three of four roles but its data layer is still mocked**, and **ML and the seller mobile app are pure spec — no code exists for either yet** (by design; explicitly deferred per standing instruction).
+
+| # | Section | Status | One-line summary |
+|---|---|---|---|
+| 1 | System Dependencies & Env Setup | 🟡 Partial | Django/FastAPI venvs + Node/pnpm done; Kotlin/Gradle/Android SDK not installed (seller app not started). |
+| 2 | Monorepo Scaffold & DevOps | 🟡 Mostly done | `docker-compose.yml` and 4 GitHub Actions workflows exist and match the plan; directory structure matches except a naming detail in §2.1 (now corrected below). |
+| 3 | Database Design | ✅ Complete | All 8 Django apps' models implemented, migrated, and applied against a live Postgres. |
+| 4 | Backend — Django | 🟡 Mostly complete | All apps + endpoints built, RBAC working, JWT auth working. Two explicit stub integration points remain (grading-trigger → FastAPI call, FCM push). Test coverage thin (1 of 8 apps tested). |
+| 5 | Backend — FastAPI | 🟡 Partial | Pricing + matching are real and tested. Grading runs an interim OpenCV heuristic, not real ML inference. `ingest_agmarknet_prices` scheduler job is a stub. |
+| 6 | Frontend — Marketing/Landing | ✅ Complete | All 5 pages built per the section-by-section clone plan. |
+| 7 | Frontend — Application Pages | ✅ UI complete / 🟡 data wiring partial | Auth is real (hits Django JWT). Buyer/Admin/Verifier consoles (17 routes total) are all built, but all non-auth data is mock (`lib/mock-data.ts`), TODO-seamed for real endpoints. |
+| 8 | Seller Mobile App (Kotlin) | ⬜ Not started | No code, no directory. Explicitly out of scope for now. |
+| 9 | ML Grading Pipeline | 🟡 ~30% | OpenCV preprocessing is real and live; the classifier is a never-run placeholder with no dataset or trained weights. |
+| 10 | Integration, Testing & Polish | ⬜ Mostly not started | Only auth is integrated end-to-end. Test counts are thin across the board; no Vitest/Playwright yet. |
+| 11 | Azure Production Migration | ⬜ Not started (by design) | Correctly deferred — untouched until local dev is complete, per the plan's own instruction. |
 
 ---
 
 ## 1. System Dependencies & Environment Setup
+
+> **Status:** 🟡 Partial. Docker/Postgres, Python venvs (Django + FastAPI), and Node/pnpm are all set up and working. Kotlin, Gradle, and the Android SDK have **not** been installed — the seller app hasn't been started.
 
 ### 1.1 Packages Requiring Root (`sudo pacman -S`)
 
@@ -66,6 +93,7 @@ sudo usermod -aG docker sparkle
 
 ```
 # backend-django/requirements.txt (core)
+# Actually installed: Django resolves to 6.1 under this open-ended pin (Python 3.14.7 venv).
 Django>=5.2
 djangorestframework>=3.15
 djangorestframework-simplejwt>=5.4
@@ -100,26 +128,37 @@ scikit-learn>=1.6
 ### 1.4 Node.js / Frontend Dependencies
 
 ```
-# Installed via pnpm inside web-app/
-next@15            # App Router
-react@19
-react-dom@19
-typescript
-tailwindcss@4      # v4 (CSS-first config)
+# Installed via pnpm inside web-app/ — actual versions as built:
+next@16.3.3         # App Router, Turbopack (plan originally targeted 15)
+react@19.2.8
+react-dom@19.2.8
+typescript@5
+tailwindcss@4        # v4 (CSS-first config)
 @tailwindcss/postcss
-motion             # (formerly framer-motion) — for Aceternity components
+motion@13            # (formerly framer-motion) — for Aceternity components
 clsx
 tailwind-merge
-lucide-react       # icons
-@tabler/icons-react # icons (used by Aceternity components)
-next-i18next       # i18n
+lucide-react
+@tabler/icons-react   # icons (used by Aceternity components)
+react-hook-form + @hookform/resolvers + zod   # forms/validation (added; not in original plan list)
+sonner                # toasts (added)
+next-themes           # theme handling (added)
+cobe                  # WebGL globe for the marketing bento grid (added)
 ```
+
+> [!NOTE]
+> `next-i18next` (Hindi/English i18n) is **not installed** — it was planned for Phase F7 polish (§6.7) but hasn't been reached; see §12 pending work.
 
 ---
 
 ## 2. Monorepo Scaffold & DevOps Foundation
 
+> **Status:** 🟡 Mostly done. `docker-compose.yml` (§2.2) and all 4 GitHub Actions workflows (§2.3) exist and match this plan. The directory structure matches too, **except** the frontend route-group naming below has been corrected — see the note under §2.1. `seller-app/` doesn't exist yet (correctly deferred, not a bug).
+
 ### 2.1 Directory Structure
+
+> [!NOTE]
+> **Correction (frontend route groups):** the original tree below used `app/(admin)/` and `app/(verifier)/` — Next.js route **groups** (parens), which do **not** add a URL segment. That would have collapsed those pages to the wrong URLs (e.g. `/verticals` instead of `/admin/verticals`). The actual build correctly used real segment folders — `app/admin/` and `app/verifier/` (no parens) — alongside `app/buyer/` (also a real segment, not `(buyer)`), while `(marketing)` and `(auth)` remain genuine route groups since those routes don't need a role prefix. The tree below reflects what was actually built.
 
 ```
 project/
@@ -133,9 +172,11 @@ project/
 │   ├── accounts/                # User model, JWT auth, RBAC
 │   ├── config/                  # Vertical config (grading schemas, pricing rules)
 │   ├── catalog/                 # Listings, grading evidence, catalog browsing
-│   ├── orders/                  # Orders, allocations, requirements
+│   ├── orders/                  # Orders, allocations, requirements, bids
 │   ├── disputes/                # Dispute handling workflow
-│   └── notifications/           # In-app notifications + FCM dispatch
+│   ├── notifications/           # In-app notifications + FCM dispatch
+│   ├── pricing/                 # Price points (Agmarknet/admin-entered/CCI) — built; not in original app list
+│   └── reputation/              # Trust/reputation scores — built; not in original app list
 │
 ├── backend-fastapi/
 │   ├── main.py
@@ -151,38 +192,44 @@ project/
 │   ├── scripts/
 │   └── requirements.txt
 │
-├── web-app/                     # Next.js 15 (buyer + admin + verifier + landing)
+├── web-app/                     # Next.js 16.3.3 (buyer + admin + verifier + landing)
 │   ├── app/                     # App Router pages
 │   │   ├── layout.tsx
-│   │   ├── page.tsx             # Landing/home page
 │   │   ├── globals.css
-│   │   ├── (marketing)/         # Route group: landing page sections
-│   │   │   ├── work/
-│   │   │   ├── products/
+│   │   ├── (marketing)/         # Route group (no URL segment) — landing page + sub-pages
+│   │   │   ├── page.tsx         # / — home
 │   │   │   ├── pricing/
+│   │   │   ├── services/        # (renamed from template's "products")
+│   │   │   ├── verticals/       # (renamed from template's "work")
 │   │   │   └── blog/
-│   │   ├── (auth)/              # Route group: login, register
+│   │   ├── (auth)/              # Route group (no URL segment) — login, register
 │   │   │   ├── login/
 │   │   │   └── register/
-│   │   ├── (buyer)/             # Route group: buyer dashboard
-│   │   │   ├── catalog/
+│   │   ├── buyer/               # REAL segment folder → /buyer/* (not a route group — see note above)
+│   │   │   ├── dashboard/
+│   │   │   ├── catalog/[id]/
 │   │   │   ├── requirements/
 │   │   │   ├── orders/
-│   │   │   └── dashboard/
-│   │   ├── (admin)/             # Route group: admin console
-│   │   │   ├── verticals/
-│   │   │   ├── verification-queue/
+│   │   │   ├── estimate/
+│   │   │   └── notifications/
+│   │   ├── admin/                # REAL segment folder → /admin/*
+│   │   │   ├── dashboard/
+│   │   │   ├── verticals/[id]/
+│   │   │   ├── verification/
 │   │   │   ├── disputes/
-│   │   │   └── dashboard/
-│   │   └── (verifier)/          # Route group: verifier console
-│   │       ├── queue/
-│   │       └── dashboard/
+│   │   │   ├── users/
+│   │   │   └── pricing/
+│   │   └── verifier/             # REAL segment folder → /verifier/*
+│   │       ├── dashboard/
+│   │       └── queue/[id]/
 │   ├── components/
 │   │   ├── ui/                  # Aceternity UI + Magic UI + shadcn base components
 │   │   ├── marketing/           # Landing page section components
 │   │   ├── buyer/               # Buyer-specific components
 │   │   ├── admin/               # Admin-specific components
-│   │   └── shared/              # Shared components (navbar, footer, etc.)
+│   │   ├── verifier/            # Verifier-specific components (built; not in original list)
+│   │   ├── verification/        # Shared admin/verifier review-dialog components (built; not in original list)
+│   │   └── shared/               # Shared components (navbar, footer, dashboard shell, stat tiles, etc.)
 │   ├── lib/
 │   │   ├── utils.ts             # cn() utility
 │   │   ├── constants.ts         # Site content data
@@ -271,6 +318,8 @@ volumes:
 
 ## 3. Database Design & Docker Compose
 
+> **Status:** ✅ Complete. All 8 Django apps' models are implemented and match the schema below closely, migrated, and confirmed applied against a live Postgres instance (`manage.py showmigrations` shows every migration checked off). Location fields use plain lat/lng `FloatField` pairs rather than PostGIS `Point` (see §3.1 note below) — a deliberate simplification to avoid a GDAL/GEOS dev dependency, documented in `backend-django/README.md`.
+
 ### 3.1 Core Schema (Django-owned, FastAPI reads directly)
 
 All tables use Django ORM models. FastAPI reads via SQLAlchemy (read-only on most tables) or direct `psycopg` for performance-critical paths.
@@ -329,6 +378,8 @@ CREATE INDEX idx_notifications_user_unread ON notifications(user_id, is_read) WH
 
 ## 4. Backend — Django (Admin/CRUD/Auth)
 
+> **Status:** 🟡 Mostly complete. All 8 apps are wired into `INSTALLED_APPS`, `manage.py check` is clean, and JWT auth (simplejwt) is fully working. Two integration points are explicit, README-acknowledged stubs (see §4.3 note). Test coverage is thin: only `accounts` has real tests (2 methods, a register→login→/me/ smoke test); the other 7 apps are untested default stub files.
+
 ### 4.1 Apps & Responsibilities
 
 | Django App | Models | Responsibilities |
@@ -339,6 +390,8 @@ CREATE INDEX idx_notifications_user_unread ON notifications(user_id, is_read) WH
 | `orders` | Requirement, Order, OrderAllocation, Bid | Requirement posting, order creation, allocation records, bid/negotiation workflow |
 | `disputes` | Dispute | Dispute creation, status transitions, evidence attachment, resolution |
 | `notifications` | Notification | Create/read/mark-read notifications, FCM push dispatch |
+| `pricing` | PricePoint | Price-point storage (Agmarknet/admin-entered/CCI), read by FastAPI's pricing service — **built but not in the original app table** |
+| `reputation` | ReputationScore | Per-user trust/reputation scores — **built but not in the original app table** |
 
 ### 4.2 API Endpoints (DRF)
 
@@ -396,23 +449,28 @@ GET    /api/reputation/{user_id}/
 
 ### 4.3 Key Implementation Details
 
-- **RBAC:** Custom permission classes per role. Sellers can only CRUD their own listings. Buyers can only see ACTIVE listings. Admins see everything. Verifiers see only the verification queue.
-- **File upload:** `django-storages` with `FileSystemStorage` backend locally (Docker volume at `/media`). Swappable to `AzureBlobStorage` via settings.
-- **Seller-app sync:** Listings created offline on the Kotlin app sync via `POST /api/catalog/listings/` on reconnection. Idempotent creation using a client-generated UUID to avoid duplicates.
-- **FCM dispatch:** When a `Notification` record is created, a Django signal dispatches it via FCM to registered devices (if the user has an FCM token stored).
+> **Status:** RBAC, file upload, and the offline-sync field are built as planned. FCM dispatch and the grading-trigger call are stubs — see the ⚠️ notes below.
+
+- **RBAC:** ✅ Built via `core/permissions.py` — 9 permission classes (`IsAdmin`, `IsSeller`, `IsBuyer`, `IsVerifier`, `IsVerifierOrAdmin`, `IsAdminOrReadOnly`, `IsListingOwnerOrReadOnly`, `IsOwnerOrAdmin`, `IsBidPartyOrAdmin`), applied per-viewset. Sellers can only CRUD their own listings. Buyers can only see ACTIVE listings. Admins see everything. Verifiers see only the verification queue.
+- **File upload:** ✅ Built. `django-storages` with `FileSystemStorage` backend locally (Docker volume at `/media`). Swappable to `AzureBlobStorage` via settings — no code changes planned at migration time.
+- **Seller-app sync:** ✅ Built on the Django side — `Listing.client_uuid` exists specifically for idempotent creation via `POST /api/catalog/listings/` on reconnection. The Kotlin app itself that would exercise this is not built (§8).
+- **FCM dispatch:** ⚠️ **Stub.** `notifications/signals.py`'s `dispatch_fcm_on_notification_create` (post_save signal on `Notification`) currently only logs a `TODO(FCM)` message instead of calling the Firebase Admin SDK. See §12.
+- **Grading trigger:** ⚠️ **Stub**, not in the original plan text but worth noting here since it's the Django↔FastAPI seam: `POST /api/catalog/listings/{id}/grading/trigger/` (`catalog/views.py:71`) currently returns a `202` with a `"todo"` field instead of actually calling FastAPI's `POST /compute/grading/grade`. See §12.
 
 ---
 
 ## 5. Backend — FastAPI (Compute/ML)
 
+> **Status:** 🟡 Partial. Pricing and matching are fully real and match this plan closely. Grading and one scheduler job are interim stubs — see the notes under §5.1, §5.3 (grading), and §5.4.
+
 ### 5.1 Services
 
-| Module | Endpoints | Responsibilities |
-|---|---|---|
-| `grading` | `POST /grading/grade` | Receives listing_id, fetches evidence from DB, runs ML on `gradeable_by_ml` attributes, writes results to `grading_results` |
-| `pricing` | `GET /pricing/base-price`, `GET /pricing/adjusted-price`, `GET /pricing/cost-estimate`, `GET /pricing/trends` | Base price lookup, grade-adjusted calculator, quantity-tiered calculator, cost estimator, historical trend data |
-| `matching` | `POST /matching/find-matches`, `POST /matching/allocate` | Matches requirements to listings, runs multi-listing allocation algorithm |
-| `scheduler` | Internal (APScheduler) | Agmarknet data ingestion (cron), price data cleanup |
+| Module | Endpoints | Responsibilities | Status |
+|---|---|---|---|
+| `grading` | `POST /grading/grade` | Receives listing_id, fetches evidence from DB, runs ML on `gradeable_by_ml` attributes, writes results to `grading_results` | 🟡 Runs a real OpenCV edge-density heuristic (`grading/pipeline.py`) as an explicit interim proxy — `requirements-ml.txt` (torch/opencv/ultralytics) isn't installed in this env, so it never reaches real MobileNetV3/YOLOv8n inference. `CONFIDENCE_VERIFICATION_THRESHOLD = 0.80` is implemented as planned. |
+| `pricing` | `GET /pricing/base-price`, `GET /pricing/adjusted-price`, `GET /pricing/cost-estimate`, `GET /pricing/trends` | Base price lookup, grade-adjusted calculator, quantity-tiered calculator, cost estimator, historical trend data | ✅ Fully real (`pricing/service.py` + `pricing/router.py`). Two TODOs remain: region-label derivation from lat/lng, and letter-grade derivation from `attribute_scores` (grade-adjustment multiplier is skipped/1.0 until then). |
+| `matching` | `POST /matching/find-matches`, `POST /matching/allocate` | Matches requirements to listings, runs multi-listing allocation algorithm | ✅ Fully real (`matching/allocation.py`, pure/DB-decoupled), 5 passing tests. TODOs: real lat/lng radius filtering (currently unfiltered by region), grade derivation from grading results. |
+| `scheduler` | Internal (APScheduler) | Agmarknet data ingestion (cron), price data cleanup | 🟡 Split status — see §5.4. |
 
 ### 5.2 Key API Endpoints
 
@@ -452,6 +510,8 @@ The most algorithmically nontrivial piece — a constrained optimization:
 > [!NOTE]
 > Start with greedy. Consider knapsack/LP only if the greedy solution produces meaningfully suboptimal results in testing — unlikely at pilot scale with 2 verticals.
 
+> **Status:** ✅ Implemented exactly as specified — `matching/allocation.py`'s `greedy_allocate()` filters by status/region/price/grade, sorts by price ascending then reputation descending, and fills greedily, with dataclasses `ListingOffer`/`Allocation`/`AllocationResult` (the latter exposing `.shortfall`/`.fully_fulfilled` for the partial-allocation case). 5 unit tests cover exact fulfillment, partial fulfillment, reputation tie-break, min-grade filtering, and inactive-listing exclusion.
+
 ### 5.4 APScheduler Jobs
 
 ```python
@@ -464,9 +524,15 @@ scheduler.add_job(ingest_agmarknet_prices, 'interval', hours=6)
 scheduler.add_job(expire_stale_listings, 'cron', hour=2, minute=0)
 ```
 
+> **Status:** Both jobs are registered in `main.py`'s lifespan handler exactly per this schedule, but only one does real work:
+> - `expire_stale_listings` — ✅ **Real.** Runs a bulk SQL `UPDATE` marking ACTIVE listings older than `STALE_LISTING_DAYS = 30` as EXPIRED, with `SQLAlchemyError` handling.
+> - `ingest_agmarknet_prices` — ⚠️ **Stub.** Only logs an info message; makes no HTTP call to Agmarknet and writes nothing to `price_points`. See §12.
+
 ---
 
 ## 6. Frontend — Web App (Next.js) — Landing/Marketing Site
+
+> **Status:** ✅ Complete. All 5 pages (home + `/verticals`, `/services`, `/pricing`, `/blog`) are built, following the section-by-section clone plan below closely. Built on Next.js 16.3.3 / React 19.2.8 (ahead of the versions named in §6.1 — see the correction there). The newsletter signup form (`components/marketing/newsletter-form.tsx`) is a TODO stub — no real list to wire it to yet.
 
 > [!IMPORTANT]
 > **This is the massive frontend planning section.** The landing site (marketing pages) will be a 1:1 clone of the [Aceternity productized agency template](https://productized-agency-template-acetern.vercel.app/), re-skinned for the MSME Marketplace. Every UI component is sourced from **Aceternity UI** (free), **Magic UI**, or **shadcn/ui** — no custom design from scratch.
@@ -486,18 +552,20 @@ The complete frontend implementation plan is maintained as a separate, detailed 
 
 ### 6.1 Tech Stack & Setup
 
-| Technology | Version | Purpose |
-|---|---|---|
-| Next.js | 15 (App Router, Turbopack) | Framework |
-| React | 19 | UI library |
-| TypeScript | Latest | Type safety |
-| Tailwind CSS | 4.0 | Styling (CSS-first config) |
-| `motion` | Latest | Animations (Aceternity components need this) |
-| `clsx` + `tailwind-merge` | Latest | Class merging utility (`cn()`) |
-| `lucide-react` | Latest | Primary icon library |
-| `@tabler/icons-react` | Latest | Secondary icons (Aceternity compat) |
-| `next-i18next` | Latest | i18n / multilingual |
-| pnpm | Latest | Package manager |
+| Technology | Planned Version | Actually Installed | Purpose |
+|---|---|---|---|
+| Next.js | 15 (App Router, Turbopack) | **16.3.3** | Framework |
+| React | 19 | **19.2.8** | UI library |
+| TypeScript | Latest | 5 | Type safety |
+| Tailwind CSS | 4.0 | 4 | Styling (CSS-first config) |
+| `motion` | Latest | 13 | Animations (Aceternity components need this) |
+| `clsx` + `tailwind-merge` | Latest | ✅ installed | Class merging utility (`cn()`) |
+| `lucide-react` | Latest | ✅ installed | Primary icon library |
+| `@tabler/icons-react` | Latest | ✅ installed | Secondary icons (Aceternity compat) |
+| `next-i18next` | Latest | ⬜ **not installed** | i18n / multilingual — deferred to Phase F7 polish, not yet reached |
+| pnpm | Latest | 11.24.0 | Package manager |
+| `react-hook-form` + `zod` | *(not in original plan)* | ✅ installed | Form validation — used across auth + all admin/buyer forms |
+| `sonner` | *(not in original plan)* | ✅ installed | Toast notifications |
 
 ### 6.2 Design System — Adapted from Template
 
@@ -810,29 +878,40 @@ Phase F7 — Polish & responsive (1–2 days)
 
 These are the **authenticated, functional pages** that connect to the Django/FastAPI backends. Built after the marketing site is polished.
 
+> **Status:** ✅ UI complete for Buyer/Admin/Verifier (17 routes across the three consoles) / 🟡 data wiring partial. Only auth actually calls the Django backend. Every other page reads from `web-app/lib/mock-data.ts`, deliberately shaped to match the Django serializers so each mock array is a like-for-like swap for a real `djangoApi.get(...)` call later. 7 write-actions are explicitly TODO-seamed (see §12 for the full file:line list): post requirement, buy/bid on a listing, verifier review submit, admin vertical-config save, admin user active-toggle, admin dispute resolve, admin price-point add.
+
 ### 7.1 Auth Pages
 
-| Page | Route | Components |
-|---|---|---|
-| Login | `/login` | Email/phone + password form, JWT storage, role-based redirect |
-| Register | `/register` | Multi-step: role selection → profile info → verification |
-| Forgot Password | `/forgot-password` | Email input → reset flow |
+> **Status:** ✅ Built and real (not mocked). Login/register hit Django's `/api/auth/login/`, `/api/auth/register/`, `/api/auth/me/` for real, session (JWT + user) stored in `localStorage` via `lib/auth.ts`. `dashboardPathForRole()` redirects to the correct console post-login.
+
+| Page | Route | Components | Status |
+|---|---|---|---|
+| Login | `/login` | Email/phone + password form, JWT storage, role-based redirect | ✅ Built |
+| Register | `/register` | Role selection → profile info; reads `?plan=` query param to default role | ✅ Built (single-step, not multi-step as originally planned) |
+| Forgot Password | `/forgot-password` | Email input → reset flow | ⬜ Not built |
+
+> [!NOTE]
+> **JWT storage is a known, documented tradeoff.** `lib/auth.ts` stores tokens in `localStorage` rather than the httpOnly refresh cookie described in §10.1 — a pragmatic dev-only choice, called out in-code as a TODO pointing back to this plan. See §12.
 
 ### 7.2 Buyer Dashboard
 
-| Page | Route | Purpose |
-|---|---|---|
-| Dashboard | `/buyer/dashboard` | Overview: active requirements, recent orders, price alerts |
-| Catalog Browse | `/buyer/catalog` | Search/filter listings by vertical, grade, location, price |
-| Listing Detail | `/buyer/catalog/[id]` | Full listing info, grading report, price breakdown, bid/buy CTA |
-| My Requirements | `/buyer/requirements` | List/create/manage requirements |
-| Requirement Detail | `/buyer/requirements/[id]` | View matches, allocation proposals, accept/reject |
-| Orders | `/buyer/orders` | Order history, status tracking |
-| Order Detail | `/buyer/orders/[id]` | Allocation breakdown, dispute option |
-| Cost Estimator | `/buyer/estimate` | Input quantity + grade → estimated cost |
-| Notifications | `/buyer/notifications` | In-app notification panel |
+> **Status:** ✅ All 8 routes built (dashboard/catalog/catalog detail/requirements/orders/estimate/notifications — no separate requirement-detail or order-detail page yet, see table). All mock-data-driven except auth.
+
+| Page | Route | Purpose | Status |
+|---|---|---|---|
+| Dashboard | `/buyer/dashboard` | Overview: active requirements, recent orders, price alerts | ✅ Built (stat tiles + recent-orders table) |
+| Catalog Browse | `/buyer/catalog` | Search/filter listings by vertical, grade, location, price | ✅ Built (client-side filter over mock listings) |
+| Listing Detail | `/buyer/catalog/[id]` | Full listing info, grading report, price breakdown, bid/buy CTA | ✅ Built. `ListingActions` (Buy Now/Contact seller) are stubbed — both just toast "coming soon" |
+| My Requirements | `/buyer/requirements` | List/create/manage requirements | ✅ Built. "Post Requirement" dialog only appends to local state, no persistence |
+| Requirement Detail | `/buyer/requirements/[id]` | View matches, allocation proposals, accept/reject | ⬜ Not built |
+| Orders | `/buyer/orders` | Order history, status tracking | ✅ Built (expandable list, multi-seller allocations shown) |
+| Order Detail | `/buyer/orders/[id]` | Allocation breakdown, dispute option | ⬜ Not built (folded into the expandable `/buyer/orders` list instead) |
+| Cost Estimator | `/buyer/estimate` | Input quantity + grade → estimated cost | ✅ Built. Computes client-side from hardcoded base-price/grade-multiplier tables, not a live FastAPI `/compute/pricing/estimate` call |
+| Notifications | `/buyer/notifications` | In-app notification panel | ✅ Built (static mock feed) |
 
 ### 7.3 Admin Console
+
+> **Status:** ✅ All 7 routes built exactly as planned, all mock-data-driven.
 
 | Page | Route | Purpose |
 |---|---|---|
@@ -846,6 +925,8 @@ These are the **authenticated, functional pages** that connect to the Django/Fas
 
 ### 7.4 Verifier Console
 
+> **Status:** ✅ All 3 routes built exactly as planned, all mock-data-driven. The review page's Confirm/Override actions toast and redirect but don't call a real endpoint yet.
+
 | Page | Route | Purpose |
 |---|---|---|
 | Dashboard | `/verifier/dashboard` | Queue count, recent reviews, accuracy stats |
@@ -854,16 +935,19 @@ These are the **authenticated, functional pages** that connect to the Django/Fas
 
 ### 7.5 Application UI Components (shadcn/ui based)
 
-For the application pages (dashboards, forms, tables), use shadcn/ui base components extensively:
-- **DataTable** (sortable, filterable, paginated) for listings, orders, disputes
-- **Form** (react-hook-form + zod validation) for all input forms
-- **Sheet/Drawer** for mobile-friendly side panels
-- **Command** (⌘K style) for quick search across listings
-- **Charts** (Recharts or shadcn charts) for price trends, analytics
+> **Status:** 🟡 Mostly built, with one substitution. Table, Form (react-hook-form + zod), Sheet/Sidebar, Tabs, Dialog, Select, Switch, and Field primitives are all built and used throughout. **No Command palette (⌘K)** exists yet. **No charting library** was added — `components/shared/price-trend-chart.tsx` is a small hand-built inline-SVG line chart instead of Recharts/shadcn charts, used on the buyer estimator page.
+
+- **DataTable** (sortable, filterable, paginated) for listings, orders, disputes — ✅ built as plain shadcn `Table` (sort/filter is client-side, not a generic reusable `DataTable` abstraction)
+- **Form** (react-hook-form + zod validation) for all input forms — ✅ built, used in auth + every admin/buyer form
+- **Sheet/Drawer** for mobile-friendly side panels — ✅ built (`components/ui/sheet.tsx`, powers the mobile sidebar)
+- **Command** (⌘K style) for quick search across listings — ⬜ not built
+- **Charts** (Recharts or shadcn charts) for price trends, analytics — 🟡 substituted with a custom inline-SVG chart (`price-trend-chart.tsx`) rather than a charting library
 
 ---
 
 ## 8. Seller Mobile App (Kotlin/Android)
+
+> **Status:** ⬜ Not started. No `seller-app/` directory, no Kotlin/Android files anywhere in the repository. This entire section remains pure forward-looking spec — explicitly out of scope for now per standing instruction to skip app/ML work while the web dashboard was being built. The Django side is already prepared for it (`Listing.client_uuid` for idempotent offline sync, §4.3), so this section can be picked up without backend changes.
 
 ### 8.1 Architecture
 
@@ -937,6 +1021,8 @@ dependencies {
 
 ## 9. ML Grading Pipeline
 
+> **Status:** 🟡 ~30% complete. The OpenCV preprocessing stage (§9.4) is real, functional, and live — dynamically imported by the FastAPI grading service. Everything past preprocessing (§9.3 model training/inference) is unbuilt: `ml-training/scripts/train_classifier.py` is an explicit, never-run placeholder (its own docstring says so); `ml-training/data/` and `ml-training/notebooks/` are empty directories; no trained weights or checkpoints exist anywhere. `requirements-ml.txt` (torch/opencv/ultralytics) is declared but not installed in the FastAPI env. Grading currently falls back to a crude OpenCV edge-density heuristic proxy (`backend-fastapi/grading/pipeline.py`) instead of real MobileNetV3/YOLOv8n inference — see §5.1.
+
 ### 9.1 Architecture
 
 ```
@@ -979,6 +1065,8 @@ Evidence Upload → Django (file storage) → FastAPI (grading trigger)
 
 ### 9.4 OpenCV Preprocessing Pipeline
 
+> **Status:** ✅ Implemented essentially as specified, in `ml-training/scripts/preprocess.py` — `extract_gabor_features()` (a real Gabor filter bank for texture) plus `preprocess_evidence()` matching the color histogram / texture / edge-density / resized-tensor shape below, with a CLI entry point. This is the module `backend-fastapi/grading/pipeline.py` dynamically imports at inference time — if the import fails (ML deps missing), grading falls back to a deterministic stub result instead (see §5.1).
+
 ```python
 def preprocess_evidence(image_path: str) -> dict:
     img = cv2.imread(image_path)
@@ -1011,23 +1099,29 @@ def preprocess_evidence(image_path: str) -> dict:
 
 ## 10. Integration, Testing & Polish
 
+> **Status:** ⬜ Mostly not started. Only the auth flow is integrated end-to-end (frontend → Django JWT). Test coverage across the whole project is thin — see §10.2 for exact counts. No Vitest, Playwright, or ML test suite exists yet.
+
 ### 10.1 API Integration (Frontend ↔ Backend)
 
-- **API client:** Centralized `lib/api.ts` with Axios/fetch wrapper
-- **JWT management:** Access token in memory, refresh token in httpOnly cookie
-- **Error handling:** Global error boundary, toast notifications for API errors
-- **Loading states:** Skeleton loaders matching the Aceternity design aesthetic
+> **Status:** 🟡 Partial, and diverges from plan on JWT storage. `lib/api.ts` is built and generic (fetch-based, `djangoApi`/`fastApi` wrappers) but **only auth endpoints are wired through it** (`login`, `register`, `getCurrentUser`) — no listings/orders/verticals/pricing calls exist yet, despite the client being ready for them.
+
+- **API client:** ✅ Built — `lib/api.ts`, fetch-based (not Axios), `djangoApi`/`fastApi` typed wrappers. Only auth calls actually go through it today.
+- **JWT management:** 🟡 Diverges from plan. Tokens are stored in `localStorage` (`lib/auth.ts`), not "access token in memory, refresh token in httpOnly cookie" as originally planned — an explicit, in-code-documented dev-only tradeoff. Moving to an httpOnly refresh cookie is tracked in §12.
+- **Error handling:** 🟡 Partial — `sonner` toasts are used ad hoc on individual pages for mock-action feedback; no global error boundary yet.
+- **Loading states:** 🟡 Partial — `Skeleton` components are used for the auth-gating layout shells (buyer/admin/verifier layouts show a skeleton while checking the session), but not systematically across every data-fetching surface (most of which is still synchronous mock data, so there's nothing to load yet).
 
 ### 10.2 Testing Strategy
 
-| Layer | Tool | Coverage Target |
-|---|---|---|
-| Django models/views | `pytest-django` | 80%+ on business logic (RBAC, allocation, grading) |
-| FastAPI endpoints | `pytest` + `httpx` | 80%+ on compute services |
-| ML grading | Custom test suite | Accuracy metrics on holdout set |
-| React components | Vitest + React Testing Library | Key interactive flows |
-| E2E flows | Playwright | Critical paths (listing creation → grading → matching → order) |
-| API contract | OpenAPI schema validation | All endpoints |
+> **Status:** ⬜ Far below target across every layer. Actual counts as of this audit:
+
+| Layer | Tool | Coverage Target | Actual |
+|---|---|---|---|
+| Django models/views | `pytest-django` | 80%+ on business logic (RBAC, allocation, grading) | ⚠️ 2 test methods total, `accounts` app only (register→login→/me/ flow, blocked admin self-registration). 7 of 8 apps have zero tests. |
+| FastAPI endpoints | `pytest` + `httpx` | 80%+ on compute services | ⚠️ 5 test functions total, `matching/allocation.py` only. `grading`, `pricing`, `scheduler`, `main.py` have zero tests. |
+| ML grading | Custom test suite | Accuracy metrics on holdout set | ⬜ None — no trained model to evaluate yet (§9). |
+| React components | Vitest + React Testing Library | Key interactive flows | ⬜ Neither Vitest nor RTL is installed. |
+| E2E flows | Playwright | Critical paths (listing creation → grading → matching → order) | ⬜ Not installed; no critical-path flow is fully wired end-to-end yet to test against. |
+| API contract | OpenAPI schema validation | All endpoints | ⬜ Not set up. |
 
 ### 10.3 Performance Targets
 
@@ -1039,6 +1133,8 @@ def preprocess_evidence(image_path: str) -> dict:
 ---
 
 ## 11. Azure Production Migration (Phase 7)
+
+> **Status:** ⬜ Not started — correctly so. Local development is not yet complete end-to-end (§7, §9, §10), so this phase should stay untouched per its own gating note below.
 
 > [!NOTE]
 > This entire section is deferred until all local development is complete and working end-to-end. The $100 Azure student credit is not touched until this phase.
@@ -1063,6 +1159,51 @@ def preprocess_evidence(image_path: str) -> dict:
 | Azure Container Apps | Consumption plan | ~$0 |
 | Azure Blob Storage | Standard LRS | ~$1–3 |
 | **Total** | | **< $15/month** |
+
+---
+
+## 12. Pending Work — Prioritized
+
+Consolidated from every ⚠️/🟡/⬜ marker above, grouped by area. File paths are relative to the repo root.
+
+### Backend — Django
+- [ ] Wire the grading-trigger endpoint to actually call FastAPI (`catalog/views.py:71`, `POST /api/catalog/listings/{id}/grading/trigger/` → `POST /compute/grading/grade`).
+- [ ] Wire FCM dispatch to the Firebase Admin SDK (`notifications/signals.py:18,28`) — currently logs only.
+- [ ] Write tests for the 7 untested apps (`catalog`, `config`, `disputes`, `notifications`, `orders`, `pricing`, `reputation`) — currently only `accounts` has coverage.
+
+### Backend — FastAPI
+- [ ] Implement real Agmarknet ingestion in `ingest_agmarknet_prices` (`scheduler/jobs.py`) — currently a stub that only logs.
+- [ ] Resolve the `grade`/`region` derivation TODOs in `matching/router.py` (lines ~38, 59–60, 75) and `pricing/router.py` (lines ~77–80, 91–94) — real lat/lng radius filtering and letter-grade-from-`attribute_scores` derivation are both unimplemented.
+- [ ] Add test coverage for `grading/`, `pricing/`, and `scheduler/` modules (only `matching/` is tested today).
+
+### Frontend
+- [ ] Wire the 7 remaining mock-data call sites to real `djangoApi`/`fastApi` calls:
+  - `lib/mock-data.ts:6` — replace all mock arrays with real fetches once the corresponding endpoints are exercised.
+  - `components/buyer/listing-actions.tsx:7` — Buy Now/Contact seller → `POST /api/orders/bids/`.
+  - `app/buyer` requirements dialog — persist via `POST /api/orders/requirements/`.
+  - `components/admin/vertical-editor.tsx:77` — Save changes → `PATCH /api/config/verticals/{id}/`.
+  - `components/verifier/review-panel.tsx:33` and `components/verification/review-dialog.tsx` — Confirm/Override/Reject → `POST /api/verification/queue/{id}/review/`.
+  - `app/admin/users/page.tsx:55` — active toggle → `PATCH /api/accounts/users/{id}/`.
+  - `app/admin/pricing/page.tsx:85` — Add price point → `POST /api/pricing/price-points/`.
+- [ ] Move session storage off `localStorage` to an httpOnly refresh cookie issued by Django (per §10.1's original design intent).
+- [ ] Add a Vitest + React Testing Library setup and a Playwright E2E setup (§10.2) — neither exists yet.
+- [ ] Decide on and build a Command palette (⌘K) if still wanted (§7.5) — currently unbuilt.
+- [ ] `next-i18next` (Hindi/English) — not yet installed; part of the deferred Phase F7 polish (§6.7).
+- [ ] `/forgot-password` page — not yet built (§7.1).
+
+### ML Pipeline
+- [ ] Collect a labeled dataset (target 200+ images/class/vertical per §9.3) under `ml-training/data/<vertical>/<attribute>/<class>/`.
+- [ ] Run `ml-training/scripts/train_classifier.py` once data exists — code-complete but never executed.
+- [ ] Install `requirements-ml.txt` (torch/opencv/ultralytics) in the FastAPI environment.
+- [ ] Swap the OpenCV edge-density heuristic in `backend-fastapi/grading/pipeline.py` for real MobileNetV3-Small / YOLOv8n inference once trained weights exist.
+
+### Seller Mobile App
+- [ ] Entire Kotlin/Android app (§8) — not started. Scaffold when this phase is greenlit; the Django-side prerequisite (`Listing.client_uuid` for idempotent offline sync) is already in place.
+
+### Testing / Polish
+- [ ] Full §10.2 test-layer buildout across all five layers (Django, FastAPI, ML, React, E2E).
+- [ ] Validate against §10.3 performance targets once there's real traffic/data to measure against.
+- [ ] Add an OpenAPI schema validation step to CI once more endpoints are frontend-wired.
 
 ---
 

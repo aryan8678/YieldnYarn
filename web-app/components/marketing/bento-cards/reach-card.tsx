@@ -1,3 +1,5 @@
+"use client";
+
 import { Globe } from "@/components/ui/globe";
 
 const INDIA_MARKERS = [

@@ -71,15 +71,62 @@ export const fastApi = {
     request<T>(FASTAPI_URL, path, { ...options, method: "POST", body }),
 };
 
-// TODO: Replace the stubs below with real calls once the Django auth
-// endpoints are finalized (see backend-django/). Wired to
-// NEXT_PUBLIC_DJANGO_API_URL.
-export async function login(_credentials: { email: string; password: string }) {
-  // return djangoApi.post<{ access: string; refresh: string }>("/auth/login/", credentials);
-  throw new Error("TODO: wire up to Django auth endpoint at NEXT_PUBLIC_DJANGO_API_URL");
+// --- Auth (backend-django/accounts) --------------------------------------
+
+export type UserRole = "SELLER" | "BUYER" | "ADMIN" | "VERIFIER";
+
+export interface UserProfile {
+  display_name: string;
+  avatar_url: string;
+  preferred_language: string;
+  location_lat: number | null;
+  location_lng: number | null;
 }
 
-export async function register(_payload: Record<string, unknown>) {
-  // return djangoApi.post("/auth/register/", payload);
-  throw new Error("TODO: wire up to Django auth endpoint at NEXT_PUBLIC_DJANGO_API_URL");
+export interface User {
+  id: number;
+  email: string;
+  phone: string;
+  role: UserRole;
+  is_active: boolean;
+  created_at: string;
+  profile?: UserProfile;
+}
+
+export interface AuthTokens {
+  access: string;
+  refresh: string;
+}
+
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}
+
+export interface RegisterPayload {
+  email: string;
+  password: string;
+  role: Exclude<UserRole, "ADMIN">;
+  phone?: string;
+  display_name?: string;
+}
+
+/** POST /api/auth/login/ — returns a JWT access + refresh pair. */
+export function login(credentials: LoginCredentials) {
+  return djangoApi.post<AuthTokens>("/auth/login/", credentials);
+}
+
+/** POST /api/auth/register/ — creates the user; caller should call login() next. */
+export function register(payload: RegisterPayload) {
+  return djangoApi.post<Pick<User, "email" | "phone" | "role">>("/auth/register/", payload);
+}
+
+/** POST /api/auth/refresh/ — exchanges a refresh token for a new access token. */
+export function refreshAccessToken(refresh: string) {
+  return djangoApi.post<{ access: string }>("/auth/refresh/", { refresh });
+}
+
+/** GET /api/auth/me/ — requires a bearer token. */
+export function getCurrentUser(token: string) {
+  return djangoApi.get<User>("/auth/me/", { token });
 }

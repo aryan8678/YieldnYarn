@@ -15,14 +15,19 @@ export const Meteors = ({
     { top: string; left: string; delay: string; duration: string }[]
   >([]);
 
+  // Math.random() is impure and can't run during render (and shouldn't run
+  // on the server, to avoid a hydration mismatch) — an effect is the
+  // correct place to generate these one-time decorative positions.
   useEffect(() => {
-    const styles = new Array(number).fill(true).map(() => ({
-      top: "-5%",
-      left: `${Math.floor(Math.random() * 100)}%`,
-      delay: `${Math.random() * 1}s`,
-      duration: `${Math.floor(Math.random() * 8 + 2)}s`,
-    }));
-    setMeteorStyles(styles);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMeteorStyles(
+      new Array(number).fill(true).map(() => ({
+        top: "-5%",
+        left: `${Math.floor(Math.random() * 100)}%`,
+        delay: `${Math.random() * 1}s`,
+        duration: `${Math.floor(Math.random() * 8 + 2)}s`,
+      }))
+    );
   }, [number]);
 
   return (
