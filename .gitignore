@@ -38,6 +38,6 @@ ml-training/**/runs/
 *.log
 .vscode/
 **/CLAUDE.md
-
+**/AGENTS.md
 # --- Docker ---
 pgdata/
