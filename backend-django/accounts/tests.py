@@ -50,3 +50,58 @@ class AuthFlowSmokeTest(APITestCase):
         }
         response = self.client.post(register_url, payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class AdminUserManagementTest(APITestCase):
+    """GET/PATCH /api/auth/users/ — admin-only list + is_active toggle
+    (accounts/views.py:AdminUserViewSet)."""
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser(
+            email="admin@example.com", password="pw12345"
+        )
+        self.buyer = User.objects.create_user(
+            email="buyer@example.com", password="pw12345", role="BUYER"
+        )
+
+    def test_admin_can_list_users(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.get(reverse("admin-user-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        emails = {u["email"] for u in response.data["results"]}
+        self.assertEqual(emails, {"admin@example.com", "buyer@example.com"})
+
+    def test_non_admin_cannot_list_users(self):
+        self.client.force_authenticate(user=self.buyer)
+
+        response = self.client.get(reverse("admin-user-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_admin_can_toggle_is_active(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            reverse("admin-user-detail", args=[self.buyer.id]),
+            {"is_active": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.buyer.refresh_from_db()
+        self.assertFalse(self.buyer.is_active)
+
+    def test_admin_cannot_change_role_via_this_endpoint(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            reverse("admin-user-detail", args=[self.buyer.id]),
+            {"role": "ADMIN"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.buyer.refresh_from_db()
+        self.assertEqual(self.buyer.role, "BUYER")

@@ -36,6 +36,26 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "is_active", "created_at"]
 
 
+class AdminUserSerializer(serializers.ModelSerializer):
+    """Admin user-management list/detail. Only `is_active` is writable here —
+    email/phone/role changes are out of scope for this endpoint."""
+
+    profile = UserProfileSerializer(required=False)
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "email",
+            "phone",
+            "role",
+            "is_active",
+            "created_at",
+            "profile",
+        ]
+        read_only_fields = ["id", "email", "phone", "role", "created_at", "profile"]
+
+
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
     display_name = serializers.CharField(

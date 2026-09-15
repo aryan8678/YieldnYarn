@@ -222,3 +222,6 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS", "http://localhost:3000"
 )
+
+# Base URL of the FastAPI compute service (grading/pricing/matching).
+FASTAPI_BASE_URL = env("FASTAPI_BASE_URL", "http://localhost:8001")

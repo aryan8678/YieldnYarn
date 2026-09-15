@@ -1,3 +1,5 @@
+import httpx
+from django.conf import settings
 from rest_framework import parsers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -68,17 +70,29 @@ class ListingViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="grading/trigger")
     def trigger_grading(self, request, pk=None):
         listing = self.get_object()
-        # TODO: call the FastAPI grading service (backend-fastapi/grading/)
-        # e.g. httpx.post(f"{FASTAPI_BASE_URL}/grading/trigger", json={"listing_id": listing.id})
-        # For now this is a stub that just acknowledges the request.
-        return Response(
-            {
-                "detail": "Grading trigger accepted.",
-                "listing_id": listing.id,
-                "todo": "Will call FastAPI grading service.",
-            },
-            status=status.HTTP_202_ACCEPTED,
-        )
+        try:
+            response = httpx.post(
+                f"{settings.FASTAPI_BASE_URL}/compute/grading/grade",
+                json={"listing_id": listing.id},
+                timeout=30.0,
+            )
+        except httpx.HTTPError as exc:
+            return Response(
+                {"detail": f"Could not reach grading service: {exc}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        if response.status_code >= 400:
+            return Response(
+                {
+                    "detail": "Grading service rejected the request.",
+                    "upstream_status": response.status_code,
+                    "upstream_body": response.text,
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(response.json(), status=status.HTTP_200_OK)
 
 
 class VerificationQueueView(APIView):

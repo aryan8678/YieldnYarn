@@ -13,6 +13,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from db import Listing, Order, OrderAllocation, ReputationScore, Requirement, get_db
+from grading.grade import derive_grade
+from grading.lookup import get_grading_schema_attributes, get_latest_grading_result
 from matching.allocation import Allocation, AllocationResult, ListingOffer, greedy_allocate
 from matching.schemas import AllocateRequest, FindMatchesRequest
 
@@ -22,22 +24,18 @@ router = APIRouter(prefix="/compute/matching", tags=["matching"])
 def _load_candidate_listings(db: Session, requirement: Requirement) -> list[ListingOffer]:
     """Build plain ListingOffer objects for the allocator from DB rows.
 
-    Two documented simplifications (first pass, not gold-plated):
+    One remaining documented simplification (first pass, not gold-plated):
 
-    1. Grade: §3.1 doesn't define an explicit `grade` column on `listings` —
-       a listing's grade is expected to come from the latest
-       `grading_results.attribute_scores`. Listings are passed through with
-       `grade=None` (treated as ungraded, and therefore excluded whenever the
-       requirement sets a `min_grade`) rather than aggregating
-       attribute_scores into a single letter grade. Revisit once that
-       contract solidifies.
-    2. Region: `listings`/`requirements` store location as plain lat/lng
-       floats (`location_lat`/`location_lng`, `region_lat`/`region_lng`)
-       rather than a text region label, and `requirements` has no explicit
-       search-radius field. Real geo-radius filtering (haversine distance or
-       PostGIS ST_DWithin) is a documented TODO; `region` is left unset
-       (None) on both sides for now, so `greedy_allocate`'s region filter is
-       effectively a no-op.
+    Region: `listings`/`requirements` store location as plain lat/lng floats
+    (`location_lat`/`location_lng`, `region_lat`/`region_lng`) rather than a
+    text region label, and `requirements` has no explicit search-radius
+    field. Real geo-radius filtering (haversine distance or PostGIS
+    ST_DWithin) is a documented TODO; `region` is left unset (None) on both
+    sides for now, so `greedy_allocate`'s region filter is effectively a
+    no-op.
+
+    Grade is now real (grading/grade.py:derive_grade, §12) — all candidate
+    listings share `requirement.vertical_id`, so the schema is fetched once.
     """
     stmt = select(Listing).where(
         Listing.vertical_id == requirement.vertical_id,
@@ -48,15 +46,21 @@ def _load_candidate_listings(db: Session, requirement: Requirement) -> list[List
         stmt = stmt.where(Listing.commodity_name.ilike(requirement.commodity))
     listings = db.execute(stmt).scalars().all()
 
+    schema_attributes = get_grading_schema_attributes(db, requirement.vertical_id)
+
     offers = []
     for listing in listings:
         reputation = db.execute(select(ReputationScore.score).where(ReputationScore.user_id == listing.seller_id)).scalar()
+        latest_grading = get_latest_grading_result(db, listing.id)
+        grade, _grade_score = derive_grade(
+            latest_grading.attribute_scores if latest_grading else None, schema_attributes
+        )
         offers.append(
             ListingOffer(
                 listing_id=listing.id,
                 available_quantity=listing.quantity,
                 unit_price=listing.price_final or listing.price_suggested or 0.0,
-                grade=None,  # TODO: derive from latest grading_results attribute_scores
+                grade=grade,
                 region=None,  # TODO: real lat/lng radius filtering (see docstring above)
                 reputation_score=reputation or 0.0,
                 status=listing.status,

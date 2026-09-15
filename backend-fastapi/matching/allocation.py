@@ -20,8 +20,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 # Ascending quality order — extend or replace per-vertical if grades aren't
-# a simple A/B/C scale.
-DEFAULT_GRADE_ORDER = ["C", "B", "A"]
+# a simple A/B/C scale. Matches the "Grade A"/"Grade B"/"Grade C" convention
+# from grading/grade.py:derive_grade, PricingRule.rules.grade_adjustment_table,
+# and every frontend mock fixture — not bare "A"/"B"/"C".
+DEFAULT_GRADE_ORDER = ["Grade C", "Grade B", "Grade A"]
 
 
 @dataclass

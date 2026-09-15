@@ -60,6 +60,8 @@ export const djangoApi = {
     request<T>(DJANGO_API_URL, path, { ...options, method: "POST", body }),
   patch: <T>(path: string, body?: unknown, options?: RequestOptions) =>
     request<T>(DJANGO_API_URL, path, { ...options, method: "PATCH", body }),
+  put: <T>(path: string, body?: unknown, options?: RequestOptions) =>
+    request<T>(DJANGO_API_URL, path, { ...options, method: "PUT", body }),
   delete: <T>(path: string, options?: RequestOptions) =>
     request<T>(DJANGO_API_URL, path, { ...options, method: "DELETE" }),
 };
@@ -129,4 +131,176 @@ export function refreshAccessToken(refresh: string) {
 /** GET /api/auth/me/ — requires a bearer token. */
 export function getCurrentUser(token: string) {
   return djangoApi.get<User>("/auth/me/", { token });
+}
+
+/**
+ * Admin user list/toggle. Note the real mount point is `/api/auth/users/`
+ * (accounts app is mounted at `/api/auth/`, not `/api/accounts/` as
+ * implementation_plan.md §12 assumed — there is no `/api/accounts/` prefix
+ * anywhere in core/urls.py).
+ */
+export interface AdminUser {
+  id: number;
+  email: string;
+  phone: string;
+  role: UserRole;
+  is_active: boolean;
+  created_at: string;
+  profile: UserProfile | null;
+}
+
+/** GET /api/auth/users/ — admin only. */
+export function listUsers(token: string) {
+  return djangoApi.get<Paginated<AdminUser>>("/auth/users/", { token });
+}
+
+/** PATCH /api/auth/users/{id}/ — admin only; only `is_active` is writable. */
+export function setUserActive(id: number, isActive: boolean, token: string) {
+  return djangoApi.patch<AdminUser>(`/auth/users/${id}/`, { is_active: isActive }, { token });
+}
+
+// --- Pagination -------------------------------------------------------------
+// Every DRF list endpoint here uses PageNumberPagination (see core/settings.py
+// REST_FRAMEWORK), so list responses are `{count, next, previous, results}`,
+// not bare arrays.
+
+export interface Paginated<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
+// --- Config (backend-django/config) -----------------------------------------
+
+export interface Vertical {
+  id: number;
+  name: string;
+  slug: string;
+  unit_of_measure: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+/** GET /api/config/verticals/ */
+export function listVerticals(token: string) {
+  return djangoApi.get<Paginated<Vertical>>("/config/verticals/", { token });
+}
+
+/** GET /api/config/verticals/{id}/ */
+export function getVertical(id: number, token: string) {
+  return djangoApi.get<Vertical>(`/config/verticals/${id}/`, { token });
+}
+
+/**
+ * `attributes` shape is a free-form JSONField (config/models.py:GradingSchema
+ * docstring). The only keys a real consumer reads today are `name` and
+ * `gradeable_by_ml` (backend-fastapi/grading/router.py:_ml_attribute_names) —
+ * everything else here (type/weight/range) is admin-UI-only for now.
+ */
+export interface GradingAttribute {
+  name: string;
+  type: "numeric" | "categorical" | "boolean";
+  gradeable_by_ml: boolean;
+  weight: number;
+  range: string;
+}
+
+export interface GradingSchema {
+  id: number;
+  vertical: number;
+  attributes: GradingAttribute[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/config/verticals/{id}/grading-schema/ */
+export function getGradingSchema(verticalId: number, token: string) {
+  return djangoApi.get<GradingSchema>(`/config/verticals/${verticalId}/grading-schema/`, { token });
+}
+
+/** PUT /api/config/verticals/{id}/grading-schema/ (admin only) */
+export function updateGradingSchema(verticalId: number, attributes: GradingAttribute[], token: string) {
+  return djangoApi.put<GradingSchema>(
+    `/config/verticals/${verticalId}/grading-schema/`,
+    { attributes },
+    { token }
+  );
+}
+
+/**
+ * `rules` shape is read live by backend-fastapi/pricing/service.py — unlike
+ * `GradingSchema.attributes`, this one has a real consumer with an exact
+ * expected shape (multipliers, not percentages). See that file's docstring.
+ */
+export interface PricingRuleGradeAdjustment {
+  grade: string;
+  multiplier: number;
+}
+
+export interface PricingRuleQuantityTier {
+  min_quantity: number;
+  multiplier: number;
+}
+
+export interface PricingRuleRules {
+  grade_adjustment_table: PricingRuleGradeAdjustment[];
+  quantity_tier_table: PricingRuleQuantityTier[];
+}
+
+export interface PricingRule {
+  id: number;
+  vertical: number;
+  rules: PricingRuleRules;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/config/verticals/{id}/pricing-rules/ */
+export function getPricingRule(verticalId: number, token: string) {
+  return djangoApi.get<PricingRule>(`/config/verticals/${verticalId}/pricing-rules/`, { token });
+}
+
+/** PUT /api/config/verticals/{id}/pricing-rules/ (admin only) */
+export function updatePricingRule(verticalId: number, rules: PricingRuleRules, token: string) {
+  return djangoApi.put<PricingRule>(
+    `/config/verticals/${verticalId}/pricing-rules/`,
+    { rules },
+    { token }
+  );
+}
+
+// --- Pricing (backend-django/pricing) ---------------------------------------
+
+export type PriceSource = "AGMARKNET" | "ADMIN_ENTERED" | "CCI";
+
+export interface PricePoint {
+  id: number;
+  vertical: number;
+  commodity: string;
+  region: string;
+  price: string; // DRF serializes DecimalField as a string
+  source: PriceSource;
+  timestamp: string;
+  raw_data: Record<string, unknown>;
+}
+
+export interface CreatePricePointPayload {
+  vertical: number;
+  commodity: string;
+  region: string;
+  price: number;
+  source: PriceSource;
+  timestamp: string;
+  raw_data?: Record<string, unknown>;
+}
+
+/** GET /api/pricing/price-points/ — any authenticated user. */
+export function listPricePoints(token: string) {
+  return djangoApi.get<Paginated<PricePoint>>("/pricing/price-points/", { token });
+}
+
+/** POST /api/pricing/price-points/ — admin only (IsAdminOrReadOnly). */
+export function createPricePoint(payload: CreatePricePointPayload, token: string) {
+  return djangoApi.post<PricePoint>("/pricing/price-points/", payload, { token });
 }
