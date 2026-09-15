@@ -24,18 +24,17 @@ router = APIRouter(prefix="/compute/matching", tags=["matching"])
 def _load_candidate_listings(db: Session, requirement: Requirement) -> list[ListingOffer]:
     """Build plain ListingOffer objects for the allocator from DB rows.
 
-    One remaining documented simplification (first pass, not gold-plated):
+    Grade and geo-radius filtering are both real (§12) — grade via
+    grading/grade.py:derive_grade, geo via matching/allocation.py:haversine_km
+    against `requirement.region_lat/region_lng` + `search_radius_km`. All
+    candidate listings share `requirement.vertical_id`, so the grading
+    schema is fetched once rather than per listing.
 
-    Region: `listings`/`requirements` store location as plain lat/lng floats
-    (`location_lat`/`location_lng`, `region_lat`/`region_lng`) rather than a
-    text region label, and `requirements` has no explicit search-radius
-    field. Real geo-radius filtering (haversine distance or PostGIS
-    ST_DWithin) is a documented TODO; `region` is left unset (None) on both
-    sides for now, so `greedy_allocate`'s region filter is effectively a
-    no-op.
-
-    Grade is now real (grading/grade.py:derive_grade, §12) — all candidate
-    listings share `requirement.vertical_id`, so the schema is fetched once.
+    One remaining documented simplification: `price_points.region` is still
+    a free-text mandi/market label with no relationship to these lat/lng
+    coordinates (see pricing/router.py's `adjusted_price` docstring) — that
+    needs real reverse-geocoding (or a bundled district-boundary dataset),
+    neither of which this environment has, so it's left alone.
     """
     stmt = select(Listing).where(
         Listing.vertical_id == requirement.vertical_id,
@@ -61,7 +60,8 @@ def _load_candidate_listings(db: Session, requirement: Requirement) -> list[List
                 available_quantity=listing.quantity,
                 unit_price=listing.price_final or listing.price_suggested or 0.0,
                 grade=grade,
-                region=None,  # TODO: real lat/lng radius filtering (see docstring above)
+                location_lat=listing.location_lat,
+                location_lng=listing.location_lng,
                 reputation_score=reputation or 0.0,
                 status=listing.status,
             )
@@ -76,7 +76,9 @@ def _run_allocation(db: Session, requirement: Requirement) -> AllocationResult:
         listings=offers,
         min_grade=requirement.min_grade or None,
         max_unit_price=requirement.max_price,
-        region=None,  # TODO: derive from requirement.region_lat/region_lng once radius filtering exists
+        center_lat=requirement.region_lat,
+        center_lng=requirement.region_lng,
+        radius_km=requirement.search_radius_km,
     )
 
 

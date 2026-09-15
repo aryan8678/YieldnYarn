@@ -1,10 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { MOCK_REQUIREMENTS, type MockRequirement } from "@/lib/mock-data";
+import {
+  ApiError,
+  listRequirements,
+  listVerticals,
+  type Requirement,
+  type Vertical,
+} from "@/lib/api";
+import { getStoredTokens } from "@/lib/auth";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { PostRequirementDialog } from "@/components/buyer/post-requirement-dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -15,7 +23,61 @@ import {
 } from "@/components/ui/table";
 
 export default function RequirementsPage() {
-  const [requirements, setRequirements] = useState<MockRequirement[]>(MOCK_REQUIREMENTS);
+  const [verticals, setVerticals] = useState<Vertical[]>([]);
+  const [requirements, setRequirements] = useState<Requirement[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async (isCancelled: () => boolean) => {
+    const token = getStoredTokens()?.access;
+    if (!token) {
+      if (!isCancelled()) {
+        setError("You must be signed in as a buyer to view requirements.");
+        setLoading(false);
+      }
+      return;
+    }
+    if (!isCancelled()) {
+      setLoading(true);
+      setError(null);
+    }
+    try {
+      const [verticalsRes, requirementsRes] = await Promise.all([
+        listVerticals(token),
+        listRequirements(token),
+      ]);
+      if (!isCancelled()) {
+        setVerticals(verticalsRes.results);
+        setRequirements(requirementsRes.results);
+      }
+    } catch (err) {
+      if (!isCancelled()) {
+        setError(err instanceof ApiError ? err.message : "Failed to load requirements.");
+      }
+    } finally {
+      if (!isCancelled()) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await load(() => cancelled);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [load]);
+
+  const verticalsById = useMemo(() => new Map(verticals.map((v) => [v.id, v])), [verticals]);
+
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-border-muted bg-surface p-8 text-center text-sm text-body">
+        {error}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -27,12 +89,8 @@ export default function RequirementsPage() {
           </p>
         </div>
         <PostRequirementDialog
-          onCreate={(req) =>
-            setRequirements((prev) => [
-              { ...req, id: Math.max(0, ...prev.map((r) => r.id)) + 1, status: "OPEN", created_at: new Date().toISOString().slice(0, 10) },
-              ...prev,
-            ])
-          }
+          verticals={verticals}
+          onCreate={(req) => setRequirements((prev) => [req, ...prev])}
         />
       </div>
 
@@ -50,21 +108,44 @@ export default function RequirementsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {requirements.map((req) => (
-              <TableRow key={req.id} className="border-border-muted">
-                <TableCell className="pl-5 font-medium text-heading">{req.commodity}</TableCell>
-                <TableCell className="text-body">
-                  {req.quantity} {req.unit}
+            {loading &&
+              Array.from({ length: 3 }).map((_, i) => (
+                <TableRow key={i} className="border-border-muted hover:bg-transparent">
+                  <TableCell className="pl-5" colSpan={7}>
+                    <Skeleton className="h-5 w-full" />
+                  </TableCell>
+                </TableRow>
+              ))}
+            {!loading &&
+              requirements.map((req) => (
+                <TableRow key={req.id} className="border-border-muted">
+                  <TableCell className="pl-5 font-medium text-heading">{req.commodity}</TableCell>
+                  <TableCell className="text-body">
+                    {req.quantity} {verticalsById.get(req.vertical)?.unit_of_measure ?? ""}
+                  </TableCell>
+                  <TableCell className="text-body">{req.min_grade || "—"}</TableCell>
+                  <TableCell className="text-body">
+                    {req.max_price ? `₹${Number(req.max_price).toLocaleString("en-IN")}` : "—"}
+                  </TableCell>
+                  <TableCell className="text-body">{req.region || "—"}</TableCell>
+                  <TableCell>
+                    <StatusBadge status={req.status} />
+                  </TableCell>
+                  <TableCell className="pr-5 text-muted-2">
+                    {new Date(req.created_at).toLocaleDateString("en-IN", {
+                      day: "2-digit",
+                      month: "short",
+                    })}
+                  </TableCell>
+                </TableRow>
+              ))}
+            {!loading && requirements.length === 0 && (
+              <TableRow className="border-border-muted hover:bg-transparent">
+                <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-2">
+                  No requirements posted yet.
                 </TableCell>
-                <TableCell className="text-body">{req.min_grade}</TableCell>
-                <TableCell className="text-body">₹{req.max_price.toLocaleString("en-IN")}</TableCell>
-                <TableCell className="text-body">{req.region}</TableCell>
-                <TableCell>
-                  <StatusBadge status={req.status} />
-                </TableCell>
-                <TableCell className="pr-5 text-muted-2">{req.created_at}</TableCell>
               </TableRow>
-            ))}
+            )}
           </TableBody>
         </Table>
       </div>

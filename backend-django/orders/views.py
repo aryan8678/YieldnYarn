@@ -41,7 +41,9 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = Order.objects.select_related("buyer", "requirement").all()
+        qs = Order.objects.select_related("buyer", "requirement").prefetch_related(
+            "allocations__listing__seller__profile"
+        )
         if user.is_superuser or user.role == "ADMIN":
             return qs
         if user.role == "BUYER":

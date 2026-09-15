@@ -1,7 +1,11 @@
+from decimal import Decimal
+
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
+
+from orders.models import Order
 
 User = get_user_model()
 
@@ -105,3 +109,45 @@ class AdminUserManagementTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.buyer.refresh_from_db()
         self.assertEqual(self.buyer.role, "BUYER")
+
+
+class AdminStatsTest(APITestCase):
+    """GET /api/auth/admin/stats/ (accounts/views.py:AdminStatsView)."""
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser(
+            email="admin2@example.com", password="pw12345"
+        )
+        self.buyer = User.objects.create_user(
+            email="buyer2@example.com", password="pw12345", role="BUYER"
+        )
+
+    def test_non_admin_forbidden(self):
+        self.client.force_authenticate(user=self.buyer)
+
+        response = self.client.get(reverse("auth-admin-stats"))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_counts_and_revenue_only_include_committed_orders(self):
+        Order.objects.create(buyer=self.buyer, status=Order.Status.CONFIRMED, total_price=Decimal("1000.00"))
+        Order.objects.create(buyer=self.buyer, status=Order.Status.FULFILLED, total_price=Decimal("500.00"))
+        Order.objects.create(buyer=self.buyer, status=Order.Status.PENDING, total_price=Decimal("999.00"))
+        Order.objects.create(buyer=self.buyer, status=Order.Status.CANCELLED, total_price=Decimal("999.00"))
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.get(reverse("auth-admin-stats"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_orders"], 4)
+        self.assertEqual(response.data["total_users"], 2)
+        self.assertEqual(Decimal(response.data["revenue"]), Decimal("1500.00"))
+
+    def test_revenue_delta_pct_none_without_last_month_data(self):
+        Order.objects.create(buyer=self.buyer, status=Order.Status.CONFIRMED, total_price=Decimal("100.00"))
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.get(reverse("auth-admin-stats"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["revenue_delta_pct"])

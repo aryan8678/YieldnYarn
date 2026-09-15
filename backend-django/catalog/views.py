@@ -5,13 +5,16 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from config.models import GradingSchema
 from core.permissions import IsListingOwnerOrReadOnly, IsVerifierOrAdmin
 
+from .grading import CONFIDENCE_VERIFICATION_THRESHOLD, derive_grade
 from .models import GradingEvidence, GradingResult, Listing
 from .serializers import (
     GradingEvidenceSerializer,
     GradingResultSerializer,
     ListingSerializer,
+    _display_name,
 )
 
 
@@ -92,19 +95,123 @@ class ListingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        return Response(response.json(), status=status.HTTP_200_OK)
+        body = response.json()
+
+        # FastAPI's /compute/grading/grade only ever writes a GradingResult
+        # row — it has no reason to also reach back into Django's Listing
+        # table (they're separate services/DBs-of-record). Something on this
+        # side has to be the one to advance the listing out of
+        # PENDING_GRADING, or it never becomes visible to a verifier
+        # (PENDING_VERIFICATION) or a buyer (ACTIVE) no matter how many times
+        # grading runs. `needs_verification` already encodes exactly the
+        # threshold check (CONFIDENCE_VERIFICATION_THRESHOLD) that decides
+        # which of those two outcomes applies.
+        if listing.status == Listing.Status.PENDING_GRADING:
+            listing.status = (
+                Listing.Status.PENDING_VERIFICATION
+                if body.get("needs_verification", True)
+                else Listing.Status.ACTIVE
+            )
+            listing.save(update_fields=["status", "updated_at"])
+
+        return Response(body, status=status.HTTP_200_OK)
+
+
+def _priority_for_confidence(confidence):
+    """Deliberate, simple, documented bucketing (§12) — not a final design.
+
+    Every item in this queue already has confidence below
+    CONFIDENCE_VERIFICATION_THRESHOLD (0.80; that's *why* it's queued), so
+    the thresholds here are calibrated below that, not against [0, 1].
+    """
+    if confidence is None:
+        return "HIGH"
+    if confidence < 0.60:
+        return "HIGH"
+    if confidence < 0.75:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _flagged_reason(confidence):
+    if confidence is None:
+        return "No AI grading result yet."
+    return (
+        f"AI confidence {confidence * 100:.0f}% is below the "
+        f"{CONFIDENCE_VERIFICATION_THRESHOLD * 100:.0f}% verification threshold."
+    )
 
 
 class VerificationQueueView(APIView):
-    """GET /api/verification/queue/  (Verifier + Admin only)"""
+    """GET /api/verification/queue/  (Verifier + Admin only)
+
+    Returns an enriched view per listing — grade/confidence (derived via
+    catalog/grading.py, §12), priority, a human-readable flagged reason, and
+    evidence count — rather than a bare ListingSerializer, since that's what
+    the verifier/admin queue UIs actually need to render without each
+    fetching grading data separately per listing.
+    """
 
     permission_classes = [IsVerifierOrAdmin]
 
     def get(self, request):
         listings = Listing.objects.filter(
             status=Listing.Status.PENDING_VERIFICATION
-        ).select_related("seller", "vertical")
-        return Response(ListingSerializer(listings, many=True).data)
+        ).select_related("seller", "seller__profile", "vertical")
+
+        schema_attributes_by_vertical: dict[int, list] = {}
+
+        def schema_attributes_for(vertical_id):
+            if vertical_id not in schema_attributes_by_vertical:
+                schema = GradingSchema.objects.filter(vertical_id=vertical_id).first()
+                schema_attributes_by_vertical[vertical_id] = (
+                    schema.attributes if schema and schema.attributes else []
+                )
+            return schema_attributes_by_vertical[vertical_id]
+
+        items = []
+        for listing in listings:
+            latest_result = listing.grading_results.order_by("-created_at").first()
+            attribute_scores = latest_result.attribute_scores if latest_result else {}
+            confidence = latest_result.confidence_score if latest_result else None
+            grade, _grade_score = derive_grade(
+                attribute_scores, schema_attributes_for(listing.vertical_id)
+            )
+
+            items.append(
+                {
+                    "id": listing.id,
+                    "listing_id": listing.id,
+                    "commodity_name": listing.commodity_name,
+                    "vertical": listing.vertical.slug,
+                    "seller_name": _display_name(listing.seller),
+                    "ai_grade": grade,
+                    "ai_confidence": confidence,
+                    "priority": _priority_for_confidence(confidence),
+                    "status": "PENDING",
+                    "evidence_image_count": listing.evidence.filter(
+                        file_type=GradingEvidence.FileType.IMAGE
+                    ).count(),
+                    "flagged_reason": _flagged_reason(confidence),
+                    "attribute_scores": [
+                        {
+                            "attribute": name,
+                            # This pipeline's per-attribute scores double as
+                            # per-attribute confidence (see grading/pipeline.py
+                            # on the FastAPI side) — there's no separate value
+                            # vs. confidence distinction in the data yet.
+                            "ai_value": f"{score * 100:.1f}%",
+                            "ai_confidence": score,
+                        }
+                        for name, score in attribute_scores.items()
+                    ],
+                    "created_at": (
+                        latest_result.created_at if latest_result else listing.updated_at
+                    ),
+                }
+            )
+
+        return Response(items)
 
 
 class VerificationReviewView(APIView):
