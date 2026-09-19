@@ -156,9 +156,9 @@ class Listing(Base):
     price_suggested = Column(Float, nullable=True)
     price_final = Column(Float, nullable=True)
     # PostGIS-in-spirit but stored as plain lat/lng floats by Django (no
-    # geoalchemy2 dependency needed here). Real radius-based matching (e.g.
-    # haversine or PostGIS ST_DWithin) is a documented TODO — see
-    # matching/router.py.
+    # geoalchemy2 dependency needed here). Real haversine-distance radius
+    # matching is live — see matching/allocation.py:haversine_km /
+    # Requirement.search_radius_km.
     location_lat = Column(Float, nullable=True)
     location_lng = Column(Float, nullable=True)
     status = Column(String, default="DRAFT", nullable=False)

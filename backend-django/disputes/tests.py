@@ -3,6 +3,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from config.models import Vertical
+from notifications.models import Notification
 from orders.models import Order
 
 from .models import Dispute
@@ -99,3 +100,21 @@ class DisputeViewSetTest(APITestCase):
         self.dispute.refresh_from_db()
         self.assertEqual(self.dispute.status, Dispute.Status.RESOLVED)
         self.assertIsNotNone(self.dispute.resolved_at)
+
+    def test_status_change_notifies_both_parties(self):
+        self.client.force_authenticate(user=self.seller)
+
+        self.client.patch(self.detail_url, {"status": "UNDER_REVIEW"}, format="json")
+
+        buyer_notification = Notification.objects.get(user=self.buyer)
+        seller_notification = Notification.objects.get(user=self.seller)
+        self.assertEqual(buyer_notification.type, Notification.Type.DISPUTE_UPDATE)
+        self.assertEqual(seller_notification.type, Notification.Type.DISPUTE_UPDATE)
+        self.assertIn("Under Review", buyer_notification.message)
+
+    def test_updating_only_resolution_notes_does_not_notify(self):
+        self.client.force_authenticate(user=self.seller)
+
+        self.client.patch(self.detail_url, {"resolution_notes": "Investigating"}, format="json")
+
+        self.assertEqual(Notification.objects.count(), 0)

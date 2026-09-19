@@ -56,6 +56,11 @@ export async function loginViaUi(page: Page, email: string, password: string) {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Log in" }).click();
   await page.waitForURL(/\/(buyer|admin|verifier)\/dashboard/);
+  // waitForURL only confirms the client-side route changed — global keyboard
+  // shortcuts (e.g. the command palette's Ctrl/Cmd+K listener) attach in a
+  // useEffect that hasn't necessarily run yet at that point, so callers that
+  // immediately send a keyboard shortcut need the page to be settled first.
+  await page.getByRole("heading", { name: "Dashboard" }).first().waitFor();
 }
 
 /**

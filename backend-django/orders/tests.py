@@ -1,9 +1,13 @@
+from unittest.mock import MagicMock, patch
+
+import httpx
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from catalog.models import Listing
 from config.models import Vertical
+from notifications.models import Notification
 
 from .models import Bid, Order, OrderAllocation, Requirement
 
@@ -86,6 +90,106 @@ class RequirementViewSetTest(APITestCase):
         response = self.client.get(f"/api/orders/requirements/{self.matched_req.id}/")
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class RequirementMatchActionTest(APITestCase):
+    """POST /api/orders/requirements/{id}/match/ — proxies to FastAPI's
+    /compute/matching/allocate (orders/views.py:RequirementViewSet.trigger_match).
+
+    Before this existed, nothing in the codebase ever called the matching
+    engine at all — posting a requirement did nothing beyond persisting the
+    row, despite the UI's own copy promising "the matching engine finds
+    sellers for you"."""
+
+    def setUp(self):
+        self.buyer = User.objects.create_user(email="buyer3@example.com", password="pw12345", role="BUYER")
+        self.vertical = Vertical.objects.create(name="Agriculture", slug="agriculture-match", unit_of_measure="kg")
+        self.requirement = Requirement.objects.create(
+            buyer=self.buyer, vertical=self.vertical, commodity="Wheat", quantity=100, status="OPEN"
+        )
+        self.url = f"/api/orders/requirements/{self.requirement.id}/match/"
+        self.client.force_authenticate(user=self.buyer)
+
+    @patch("orders.views.httpx.post")
+    def test_successful_match_notifies_the_buyer(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "order_id": 42,
+                "allocations": [{"listing_id": 7, "allocated_quantity": 100.0, "unit_price": 2000.0}],
+                "total_price": 200000.0,
+                "fully_fulfilled": True,
+                "shortfall": 0,
+            },
+        )
+        self.requirement.status = "MATCHED"  # what the FastAPI call would have set in real Postgres
+        self.requirement.save(update_fields=["status"])
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["matched"])
+        self.assertEqual(response.data["order_id"], 42)
+
+        mock_post.assert_called_once()
+        called_url = mock_post.call_args.args[0]
+        self.assertTrue(called_url.endswith("/compute/matching/allocate"))
+        self.assertEqual(mock_post.call_args.kwargs["json"], {"requirement_id": self.requirement.id})
+
+        notification = Notification.objects.get(user=self.buyer)
+        self.assertEqual(notification.type, Notification.Type.ORDER_MATCHED)
+        self.assertEqual(notification.title, "Requirement matched")
+        self.assertIn("Order #42", notification.message)
+        self.assertEqual(notification.related_object_id, 42)
+
+    @patch("orders.views.httpx.post")
+    def test_partial_match_notification_says_partially_matched(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "order_id": 43,
+                "allocations": [{"listing_id": 7, "allocated_quantity": 25.0, "unit_price": 2000.0}],
+                "total_price": 50000.0,
+                "fully_fulfilled": False,
+                "shortfall": 75,
+            },
+        )
+
+        self.client.post(self.url)
+
+        notification = Notification.objects.get(user=self.buyer)
+        self.assertEqual(notification.title, "Requirement partially matched")
+
+    @patch("orders.views.httpx.post")
+    def test_no_match_yet_returns_200_matched_false_without_a_notification(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=409, text="no matching listings available for this requirement")
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["matched"])
+        self.assertEqual(Notification.objects.count(), 0)
+
+    @patch("orders.views.httpx.post")
+    def test_service_unreachable_returns_503(self, mock_post):
+        mock_post.side_effect = httpx.ConnectError("connection refused")
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertFalse(response.data["matched"])
+
+    def test_seller_cannot_trigger_match_on_someone_elses_requirement(self):
+        # Sellers can list OPEN requirements as demand signals (get_queryset),
+        # but IsOwnerOrAdmin's object-level check only recognizes buyer_id —
+        # so a detail action like this one is still 403, not something a
+        # non-owning seller can trigger.
+        seller = User.objects.create_user(email="seller3@example.com", password="pw12345", role="SELLER")
+        self.client.force_authenticate(user=seller)
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class OrderViewSetTest(APITestCase):
@@ -206,6 +310,22 @@ class BidViewSetTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["buyer"], self.buyer.id)
 
+    def test_create_notifies_the_listing_owner(self):
+        self.client.force_authenticate(user=self.buyer)
+
+        self.client.post(
+            "/api/orders/bids/",
+            {"listing": self.listing.id, "offered_price": "2100.00", "offered_quantity": "40.00"},
+            format="json",
+        )
+
+        # self.bid in setUp is created directly via Bid.objects.create(),
+        # bypassing BidSerializer.create() (and so its notification) — only
+        # this POST goes through the real API.
+        notification = Notification.objects.get(user=self.seller)
+        self.assertEqual(notification.type, Notification.Type.BID_RECEIVED)
+        self.assertIn("Wheat", notification.message)
+
     def test_listing_owner_can_accept_bid(self):
         self.client.force_authenticate(user=self.seller)
 
@@ -237,6 +357,28 @@ class BidViewSetTest(APITestCase):
         self.assertEqual(allocation.allocated_quantity, 50)
         self.assertEqual(allocation.unit_price, 2000)
         self.assertEqual(allocation.status, OrderAllocation.Status.CONFIRMED)
+
+    def test_accepting_a_bid_notifies_the_buyer(self):
+        self.client.force_authenticate(user=self.seller)
+
+        self.client.patch(self.detail_url, {"status": "ACCEPTED"}, format="json")
+
+        notification = Notification.objects.get(user=self.buyer)
+        self.assertEqual(notification.type, Notification.Type.ORDER_MATCHED)
+        order = Order.objects.get()
+        self.assertEqual(notification.related_object_type, "order")
+        self.assertEqual(notification.related_object_id, order.id)
+
+    def test_rejecting_a_bid_notifies_the_buyer(self):
+        self.client.force_authenticate(user=self.seller)
+
+        response = self.client.patch(self.detail_url, {"status": "REJECTED"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        notification = Notification.objects.get(user=self.buyer)
+        self.assertEqual(notification.type, Notification.Type.SYSTEM)
+        self.assertIn("rejected", notification.message)
+        self.assertEqual(Order.objects.count(), 0)
 
     def test_accepting_a_bid_decrements_listing_quantity(self):
         self.client.force_authenticate(user=self.seller)

@@ -141,6 +141,19 @@ def allocate(payload: AllocateRequest, db: Session = Depends(get_db)):
                     status="PENDING",
                 )
             )
+            # This endpoint used to create the allocation rows without ever
+            # touching the source Listing — its `quantity` stayed at the
+            # pre-allocation value forever, so the same stock could be
+            # "matched" again by a later requirement, and the listing never
+            # sold out through this path no matter how much of it was
+            # allocated. Mirrors the same decrement/SOLD logic already
+            # applied on direct bid acceptance (orders/serializers.py:
+            # BidSerializer._create_order_for_accepted_bid on the Django side).
+            listing = db.get(Listing, a.listing_id)
+            remaining = listing.quantity - a.allocated_quantity
+            listing.quantity = max(remaining, 0.0)
+            if remaining <= 0:
+                listing.status = "SOLD"
 
         requirement.status = "MATCHED" if result.fully_fulfilled else "OPEN"
         db.commit()

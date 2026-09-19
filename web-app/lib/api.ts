@@ -133,6 +133,22 @@ export function getCurrentUser(token: string) {
   return djangoApi.get<User>("/auth/me/", { token });
 }
 
+/** POST /api/auth/password-reset/ — always resolves 200 regardless of
+ * whether the email exists (enumeration protection on the backend). */
+export function requestPasswordReset(email: string) {
+  return djangoApi.post<{ detail: string }>("/auth/password-reset/", { email });
+}
+
+/** POST /api/auth/password-reset/confirm/ — throws ApiError(400) for an
+ * invalid/expired/already-used reset link. */
+export function confirmPasswordReset(uid: string, token: string, newPassword: string) {
+  return djangoApi.post<{ detail: string }>("/auth/password-reset/confirm/", {
+    uid,
+    token,
+    new_password: newPassword,
+  });
+}
+
 /**
  * Admin user list/toggle. Note the real mount point is `/api/auth/users/`
  * (accounts app is mounted at `/api/auth/`, not `/api/accounts/` as
@@ -434,6 +450,22 @@ export function listRequirements(token: string) {
 /** POST /api/orders/requirements/ — buyer is set server-side from the token. */
 export function createRequirement(payload: CreateRequirementPayload, token: string) {
   return djangoApi.post<Requirement>("/orders/requirements/", payload, { token });
+}
+
+export interface MatchAttempt {
+  matched: boolean;
+  detail?: string;
+  order_id?: number;
+  requirement_status?: RequirementStatus;
+  fully_fulfilled?: boolean;
+  shortfall?: number;
+}
+
+/** POST /api/orders/requirements/{id}/match/ — proxies to FastAPI's matching
+ * engine. Always resolves (200) with `matched: false` rather than throwing
+ * when nothing matches yet — that's a normal outcome, not an error. */
+export function triggerRequirementMatch(id: number, token: string) {
+  return djangoApi.post<MatchAttempt>(`/orders/requirements/${id}/match/`, undefined, { token });
 }
 
 export type OrderStatus = "PENDING" | "CONFIRMED" | "FULFILLED" | "DISPUTED" | "CANCELLED";

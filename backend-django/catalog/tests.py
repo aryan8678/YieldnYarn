@@ -7,6 +7,7 @@ from rest_framework.test import APITestCase
 
 from accounts.models import UserProfile
 from config.models import GradingSchema, Vertical
+from notifications.models import Notification
 
 from .grading import derive_grade
 from .models import GradingEvidence, GradingResult, Listing
@@ -351,6 +352,29 @@ class GradingTriggerTest(APITestCase):
         self.assertEqual(self.listing.status, Listing.Status.ACTIVE)
 
     @patch("catalog.views.httpx.post")
+    def test_trigger_grading_notifies_seller(self, mock_post):
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "listing_id": self.listing.id,
+                "grading_result_id": 1,
+                "attribute_scores": {"foreign_matter": 0.6},
+                "overall_confidence": 0.6,
+                "needs_verification": True,
+                "method": "opencv-heuristic",
+            },
+        )
+
+        self.client.post(self.url)
+
+        self.assertEqual(Notification.objects.filter(user=self.seller).count(), 1)
+        notification = Notification.objects.get(user=self.seller)
+        self.assertEqual(notification.type, Notification.Type.GRADING_COMPLETE)
+        self.assertIn("queued for verifier review", notification.message)
+        self.assertEqual(notification.related_object_type, "listing")
+        self.assertEqual(notification.related_object_id, self.listing.id)
+
+    @patch("catalog.views.httpx.post")
     def test_trigger_grading_returns_503_when_service_unreachable(self, mock_post):
         mock_post.side_effect = httpx.ConnectError("connection refused")
 
@@ -372,3 +396,128 @@ class GradingTriggerTest(APITestCase):
         response = self.client.post(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class VerificationReviewViewTest(APITestCase):
+    """POST /api/verification/queue/{listing_id}/review/ (catalog/views.py:
+    VerificationReviewView) — previously had zero test coverage despite
+    being the actual verifier approve/reject action."""
+
+    def setUp(self):
+        self.vertical = Vertical.objects.create(
+            name="Agriculture", slug="agriculture-review", unit_of_measure="kg"
+        )
+        self.seller = User.objects.create_user(
+            email="seller-review@example.com", password="pw12345", role="SELLER"
+        )
+        self.verifier = User.objects.create_user(
+            email="verifier-review@example.com", password="pw12345", role="VERIFIER"
+        )
+        self.buyer = User.objects.create_user(
+            email="buyer-review@example.com", password="pw12345", role="BUYER"
+        )
+        self.listing = Listing.objects.create(
+            seller=self.seller,
+            vertical=self.vertical,
+            commodity_name="Wheat",
+            quantity=100,
+            unit="kg",
+            status=Listing.Status.PENDING_VERIFICATION,
+        )
+        self.url = f"/api/verification/queue/{self.listing.id}/review/"
+        self.client.force_authenticate(user=self.verifier)
+
+    def test_approve_activates_the_listing_and_records_a_verifier_grading_result(self):
+        response = self.client.post(
+            self.url, {"decision": "APPROVE", "notes": "Looks good", "attribute_scores": {"purity": "95%"}}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, Listing.Status.ACTIVE)
+
+        result = GradingResult.objects.get(listing=self.listing)
+        self.assertEqual(result.source, GradingResult.Source.VERIFIER)
+        self.assertEqual(result.graded_by, self.verifier)
+        self.assertEqual(result.confidence_score, 1.0)
+        self.assertEqual(result.notes, "Looks good")
+
+    def test_confirming_without_attribute_scores_carries_forward_the_ai_scores(self):
+        # Regression check: "Confirm AI Grade" (components/verifier/
+        # review-panel.tsx) sends no attribute_scores at all — that used to
+        # default to {}, silently blanking a confirmed listing's grade data
+        # even though its status correctly went ACTIVE. Anything that derives
+        # a grade from attribute_scores (matching's min_grade filter,
+        # pricing's grade adjustment) would then treat a *confirmed,
+        # AI-graded* listing as ungraded.
+        GradingResult.objects.create(
+            listing=self.listing,
+            source=GradingResult.Source.AI,
+            confidence_score=0.75,
+            attribute_scores={"purity": 0.75, "moisture": 0.75},
+        )
+
+        response = self.client.post(self.url, {"decision": "APPROVE", "notes": "Looks good"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        latest_result = GradingResult.objects.filter(listing=self.listing).order_by("-created_at").first()
+        self.assertEqual(latest_result.source, GradingResult.Source.VERIFIER)
+        self.assertEqual(latest_result.attribute_scores, {"purity": 0.75, "moisture": 0.75})
+
+    def test_explicit_override_scores_are_not_overwritten_by_ai_scores(self):
+        GradingResult.objects.create(
+            listing=self.listing,
+            source=GradingResult.Source.AI,
+            confidence_score=0.75,
+            attribute_scores={"purity": 0.75},
+        )
+
+        response = self.client.post(
+            self.url,
+            {"decision": "APPROVE", "notes": "Corrected purity", "attribute_scores": {"purity": 0.5}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        latest_result = GradingResult.objects.filter(listing=self.listing).order_by("-created_at").first()
+        self.assertEqual(latest_result.attribute_scores, {"purity": 0.5})
+
+    def test_reject_sends_the_listing_back_to_draft(self):
+        response = self.client.post(self.url, {"decision": "REJECT", "notes": "Blurry evidence"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, Listing.Status.DRAFT)
+
+    def test_notifies_the_seller_on_approve(self):
+        self.client.post(self.url, {"decision": "APPROVE", "notes": ""}, format="json")
+
+        notification = Notification.objects.get(user=self.seller)
+        self.assertEqual(notification.type, Notification.Type.GRADING_COMPLETE)
+        self.assertIn("now live", notification.message)
+
+    def test_notifies_the_seller_on_reject_including_notes(self):
+        self.client.post(self.url, {"decision": "REJECT", "notes": "Blurry evidence"}, format="json")
+
+        notification = Notification.objects.get(user=self.seller)
+        self.assertIn("sent back to draft", notification.message)
+        self.assertIn("Blurry evidence", notification.message)
+
+    def test_returns_404_for_a_listing_not_in_the_queue(self):
+        active_listing = Listing.objects.create(
+            seller=self.seller, vertical=self.vertical, commodity_name="Rice",
+            quantity=10, unit="kg", status=Listing.Status.ACTIVE,
+        )
+
+        response = self.client.post(
+            f"/api/verification/queue/{active_listing.id}/review/", {"decision": "APPROVE"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_buyer_forbidden(self):
+        self.client.force_authenticate(user=self.buyer)
+
+        response = self.client.post(self.url, {"decision": "APPROVE"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

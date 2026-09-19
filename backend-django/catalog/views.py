@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 
 from config.models import GradingSchema
 from core.permissions import IsListingOwnerOrReadOnly, IsVerifierOrAdmin
+from notifications.models import Notification
 
 from .grading import CONFIDENCE_VERIFICATION_THRESHOLD, derive_grade
 from .models import GradingEvidence, GradingResult, Listing
@@ -107,12 +108,25 @@ class ListingViewSet(viewsets.ModelViewSet):
         # threshold check (CONFIDENCE_VERIFICATION_THRESHOLD) that decides
         # which of those two outcomes applies.
         if listing.status == Listing.Status.PENDING_GRADING:
+            needs_verification = body.get("needs_verification", True)
             listing.status = (
                 Listing.Status.PENDING_VERIFICATION
-                if body.get("needs_verification", True)
+                if needs_verification
                 else Listing.Status.ACTIVE
             )
             listing.save(update_fields=["status", "updated_at"])
+            Notification.objects.create(
+                user_id=listing.seller_id,
+                type=Notification.Type.GRADING_COMPLETE,
+                title="Grading complete",
+                message=(
+                    f"{listing.commodity_name} passed grading and is queued for verifier review."
+                    if needs_verification
+                    else f"{listing.commodity_name} passed grading and is now live in the catalog."
+                ),
+                related_object_type="listing",
+                related_object_id=listing.id,
+            )
 
         return Response(body, status=status.HTTP_200_OK)
 
@@ -235,7 +249,20 @@ class VerificationReviewView(APIView):
 
         decision = request.data.get("decision", "APPROVE").upper()
         notes = request.data.get("notes", "")
-        attribute_scores = request.data.get("attribute_scores", {})
+        attribute_scores = request.data.get("attribute_scores")
+        if not attribute_scores:
+            # "Confirm AI Grade" (components/verifier/review-panel.tsx) sends
+            # no attribute_scores at all — that means "I agree with the AI's
+            # scores", not "this listing has no scores". Carry the latest
+            # existing result's scores forward instead of defaulting to {},
+            # which would otherwise silently blank out an AI-graded listing's
+            # attribute_scores the moment a verifier confirms it — downstream
+            # readers (matching's min_grade filter, pricing's grade
+            # adjustment) derive a listing's grade from attribute_scores, not
+            # from status, so an empty dict here makes a confirmed listing
+            # look ungraded everywhere except the status field itself.
+            latest_result = listing.grading_results.order_by("-created_at").first()
+            attribute_scores = latest_result.attribute_scores if latest_result else {}
 
         GradingResult.objects.create(
             listing=listing,
@@ -252,5 +279,19 @@ class VerificationReviewView(APIView):
             else Listing.Status.DRAFT
         )
         listing.save(update_fields=["status", "updated_at"])
+
+        Notification.objects.create(
+            user_id=listing.seller_id,
+            type=Notification.Type.GRADING_COMPLETE,
+            title="Listing reviewed",
+            message=(
+                f"{listing.commodity_name} was approved by a verifier and is now live."
+                if decision == "APPROVE"
+                else f"{listing.commodity_name} was sent back to draft by a verifier."
+                + (f" Notes: {notes}" if notes else "")
+            ),
+            related_object_type="listing",
+            related_object_id=listing.id,
+        )
 
         return Response(ListingSerializer(listing).data)

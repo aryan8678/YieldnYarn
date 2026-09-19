@@ -3,6 +3,7 @@ from rest_framework.exceptions import PermissionDenied
 
 from catalog.models import Listing
 from catalog.serializers import _display_name
+from notifications.models import Notification
 
 from .models import Bid, Order, OrderAllocation, Requirement
 
@@ -103,7 +104,19 @@ class BidSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data["buyer"] = self.context["request"].user
-        return super().create(validated_data)
+        bid = super().create(validated_data)
+        Notification.objects.create(
+            user_id=bid.listing.seller_id,
+            type=Notification.Type.BID_RECEIVED,
+            title="New bid received",
+            message=(
+                f"{_display_name(bid.buyer)} offered ₹{bid.offered_price} for "
+                f"{bid.offered_quantity} {bid.listing.unit} of {bid.listing.commodity_name}."
+            ),
+            related_object_type="bid",
+            related_object_id=bid.id,
+        )
+        return bid
 
     def validate(self, attrs):
         # ACCEPTED/REJECTED are the listing owner's call, not the bidding
@@ -124,10 +137,27 @@ class BidSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         new_status = validated_data.get("status")
-        already_accepted = instance.status == Bid.Status.ACCEPTED
+        previous_status = instance.status
         bid = super().update(instance, validated_data)
-        if new_status == Bid.Status.ACCEPTED and not already_accepted:
-            self._create_order_for_accepted_bid(bid)
+        if new_status == Bid.Status.ACCEPTED and previous_status != Bid.Status.ACCEPTED:
+            order = self._create_order_for_accepted_bid(bid)
+            Notification.objects.create(
+                user_id=bid.buyer_id,
+                type=Notification.Type.ORDER_MATCHED,
+                title="Bid accepted",
+                message=f"Your bid on {bid.listing.commodity_name} was accepted. Order #{order.id} created.",
+                related_object_type="order",
+                related_object_id=order.id,
+            )
+        elif new_status == Bid.Status.REJECTED and previous_status != Bid.Status.REJECTED:
+            Notification.objects.create(
+                user_id=bid.buyer_id,
+                type=Notification.Type.SYSTEM,
+                title="Bid rejected",
+                message=f"Your bid on {bid.listing.commodity_name} was rejected by the seller.",
+                related_object_type="bid",
+                related_object_id=bid.id,
+            )
         return bid
 
     def _create_order_for_accepted_bid(self, bid):
@@ -153,3 +183,4 @@ class BidSerializer(serializers.ModelSerializer):
         if remaining <= 0:
             listing.status = Listing.Status.SOLD
         listing.save(update_fields=["quantity", "status"])
+        return order

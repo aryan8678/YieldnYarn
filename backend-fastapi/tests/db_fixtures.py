@@ -5,7 +5,7 @@ no separate test database)."""
 from datetime import datetime, timezone
 
 from conftest import delete_user, make_user
-from db import GradingResult, GradingSchema, Listing, PricePoint, PricingRule, Vertical
+from db import GradingResult, GradingSchema, Listing, Order, OrderAllocation, PricePoint, PricingRule, Requirement, Vertical
 
 
 def make_vertical(db_session, slug: str, attributes: list | None = None, rules: dict | None = None) -> int:
@@ -68,11 +68,48 @@ def make_price_point(db_session, vertical_id: int, **overrides) -> int:
     return price_point.id
 
 
-def cleanup(db_session, *, listing_ids=(), vertical_ids=(), seller_ids=(), price_point_ids=()) -> None:
+def make_requirement(db_session, buyer_id: int, vertical_id: int, **overrides) -> int:
+    defaults = dict(
+        buyer_id=buyer_id,
+        vertical_id=vertical_id,
+        commodity="Pytest Wheat",
+        quantity=100,
+        min_grade="",
+        region="",
+        search_radius_km=100.0,
+        status="OPEN",
+        created_at=datetime.now(timezone.utc),
+    )
+    defaults.update(overrides)
+    requirement = Requirement(**defaults)
+    db_session.add(requirement)
+    db_session.commit()
+    db_session.refresh(requirement)
+    return requirement.id
+
+
+def cleanup(
+    db_session,
+    *,
+    listing_ids=(),
+    vertical_ids=(),
+    seller_ids=(),
+    price_point_ids=(),
+    requirement_ids=(),
+    order_ids=(),
+    buyer_ids=(),
+) -> None:
     """Delete in dependency order, all within one commit (FKs here are
     DEFERRABLE INITIALLY DEFERRED, so intra-transaction order doesn't
     strictly matter, but this stays close to real dependency order anyway)."""
+    if order_ids:
+        db_session.query(OrderAllocation).filter(OrderAllocation.order_id.in_(order_ids)).delete(synchronize_session=False)
+        db_session.query(Order).filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+    if requirement_ids:
+        db_session.query(Order).filter(Order.requirement_id.in_(requirement_ids)).delete(synchronize_session=False)
+        db_session.query(Requirement).filter(Requirement.id.in_(requirement_ids)).delete(synchronize_session=False)
     if listing_ids:
+        db_session.query(OrderAllocation).filter(OrderAllocation.listing_id.in_(listing_ids)).delete(synchronize_session=False)
         db_session.query(GradingResult).filter(GradingResult.listing_id.in_(listing_ids)).delete(synchronize_session=False)
         db_session.query(Listing).filter(Listing.id.in_(listing_ids)).delete(synchronize_session=False)
     if price_point_ids:
@@ -82,8 +119,8 @@ def cleanup(db_session, *, listing_ids=(), vertical_ids=(), seller_ids=(), price
         db_session.query(PricingRule).filter(PricingRule.vertical_id.in_(vertical_ids)).delete(synchronize_session=False)
         db_session.query(Vertical).filter(Vertical.id.in_(vertical_ids)).delete(synchronize_session=False)
     db_session.commit()
-    for seller_id in seller_ids:
+    for seller_id in {*seller_ids, *buyer_ids}:
         delete_user(db_session, seller_id)
 
 
-__all__ = ["make_user", "make_vertical", "make_listing", "make_price_point", "cleanup"]
+__all__ = ["make_user", "make_vertical", "make_listing", "make_price_point", "make_requirement", "cleanup"]
